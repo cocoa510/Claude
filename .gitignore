@@ -1,0 +1,7 @@
+.env
+*.pyc
+__pycache__/
+.venv/
+*.egg-info/
+.claude/projects/
+fx_trading_system/
