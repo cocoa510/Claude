@@ -4,4 +4,5 @@ __pycache__/
 .venv/
 *.egg-info/
 .claude/projects/
+ATLAS/
 fx_trading_system/
