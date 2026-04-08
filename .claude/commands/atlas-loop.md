@@ -8,9 +8,74 @@
 - `--resume <generation_id>` — 既存世代から改良ループを再開
 - `--max-generations <N>` — 世代上限（デフォルト: 10）
 - `--target-score <S>` — 目標スコア（デフォルト: 0.75）
+- `--types <type1,type2,...>` — 戦略タイプローテーション順序を明示指定
+- `--no-rotate` — タイプ自動ローテーションを無効化（系統廃棄時にループ停止）
 - `--dry-run` — 実行計画のみ表示（実行しない）
 - 例: `trend_following USDJPY --max-generations 5`
+- 例: `trend_following USDJPY --types trend_following,breakout,mean_reversion`
 - 例: `--resume ATLAS-2026-0404-001 --target-score 0.80`
+
+## 戦略タイプ自動切替
+
+現在の戦略系統が**行き詰まった場合**（abandoned / converged_stagnation / converged_oscillation / 全バリアント品質下限割れ）、自動的に**現状とは異なる戦略タイプ**に切り替えて新規生成からループを再開する。
+
+### 切替候補プール
+
+以下の6タイプから現在のタイプを除外したものが候補:
+```
+trend_following / mean_reversion / breakout / momentum / volatility / hybrid
+```
+
+`--types <list>` 指定時はそのリストに限定する。
+
+### 次タイプの選択ロジック
+
+1. **過去結果に有望なタイプがある場合 → そのタイプを選択**
+   - `ATLAS/strategies/` 配下の全戦略の `backtest/result.json` を走査
+   - 現在のタイプを除いた中で **最良スコア** (PF×Sharpe など) を出したタイプを抽出
+   - 候補が「未試行」または「平均PF >= 0.9」など有望な兆候があればそれを選択
+2. **有望なタイプがない場合 → 候補プールからランダムに選択**
+   - 直前のタイプは除外
+   - `--no-rotate` 指定時はループ停止
+
+> 厳密な順序ローテーションは行わない。ユーザー要求により「現状と違えば OK」という方針。
+
+### 状態管理
+
+`logs/loop_session.json` に以下を追記:
+```json
+{
+  "session_start": "...",
+  "limit_minutes": 300,
+  "threshold_pct": 94,
+  "available_types": ["trend_following", "mean_reversion", "breakout", "momentum", "volatility", "hybrid"],
+  "current_type": "trend_following",
+  "type_history": {
+    "trend_following": {
+      "lineages": ["ATLAS-2026-0408-001", ...],
+      "best_pf": 2.2441,
+      "best_sharpe": 0.283,
+      "result": "abandoned"
+    }
+  }
+}
+```
+
+### 切替発動条件と動作
+
+| 発動条件 | 動作 |
+|---------|------|
+| `abandoned` 判定 | 別タイプで新規生成 |
+| `converged_stagnation` | 別タイプへ切替 |
+| `converged_oscillation` | 別タイプへ切替 |
+| 全バリアントが品質下限割れ | 即座に別タイプへ |
+| `--no-rotate` 指定時 | 上記の代わりにループ停止 |
+
+### 切替時の引き継ぎ
+
+次タイプへの遷移時は **過去全タイプの失敗履歴をコンテキストとして渡す**。`fx-strategist` エージェントは:
+- 以前のタイプで失敗した原因（例: WR 38% 固定、PF 0.7 収束）を回避する設計を試みる
+- 通貨ペア・時間足・データ範囲は維持する
 
 ## アーキテクチャ
 
@@ -134,11 +199,20 @@ cd ATLAS && .venv/Scripts/python.exe -m atlas.main converge <generation_id>
 | 判定 | アクション |
 |------|----------|
 | `excellent` | ループ停止。最終レポート出力 |
-| `converged_stagnation` | ル���プ停止。改善停滞を報告 |
-| `converged_oscillation` | ループ停止。振動検出を報告 |
-| `abandoned` | この系統を廃棄。新規生成に切り替え |
+| `converged_stagnation` | **タイプ切替発動** — 別の戦略タイプで新規生成（`--no-rotate` 時はループ停止） |
+| `converged_oscillation` | **タイプ切替発動** — 別の戦略タイプで新規生成（`--no-rotate` 時はループ停止） |
+| `abandoned` | **タイプ切替発動** — 別の戦略タイプで新規生成（`--no-rotate` 時はループ停止） |
 | `max_generations` | ループ停止。世代上限到達を報告 |
 | `continue` | 次のステップ（Step 3.5）へ |
+
+**タイプ切替発動時の手順:**
+1. `logs/loop_session.json` の `type_history[current_type].result` に終了理由を記録
+2. `ATLAS/strategies/` 配下の過去結果から「現在のタイプを除く有望タイプ」を探索
+   - 各タイプの best_pf / best_sharpe を集計
+   - PF >= 0.9 などの基準で「有望」を判定
+3. 有望タイプが見つかればそれを選択、見つからなければ `available_types` から `current_type` を除いてランダム選択
+4. 次タイプを `current_type` に設定し、フェーズ2（初期生成）に戻る
+5. fx-strategist 起動時に過去全タイプの失敗履歴をコンテキストに渡す
 
 #### Step 3.5: 改良版生成（継続時のみ）
 
@@ -224,7 +298,7 @@ final_score: 0.76
 ## エラーハンドリング
 - エージェント起動に失敗した場合、エラー内容をログに記録しリトライ（最大3回）
 - Python CLIがエラーを返した場合、エラーJSONの内容に基づいて判断
-- 全バリアントが品質下限割れした場合、戦略タイプの変更を提案
+- 全バリアントが品質下限割れした場合、**自動的に次の戦略タイプにローテーション**（`--no-rotate` 時は提案のみ）
 - ユーザーによる中断（Ctrl+C）時、現在の状態はHistory Storeに保存済み。`--resume` で再開可能
 
 ## 自動実行（ユーザー操作なし）
