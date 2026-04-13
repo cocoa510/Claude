@@ -26,9 +26,11 @@
 ## Git運用ルール
 
 - コミットメッセージ形式: `[種別] 内容の概要`
-  - 種別例: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`
+  - 種別例: `feat`, `fix:bug`, `change:spec`, `refactor`, `test`, `docs`, `chore`
+  - `[fix:bug]` — 既存定義に対する実装バグの修正（出力の期待値は変わらない）
+  - `[change:spec]` — 計算ロジック・閾値・インターフェースの意図的な定義変更
+  - `[refactor]` — 出力結果を変えない内部構造の整理
 - 機能単位でブランチを切る（`feature/xxx`, `fix/xxx`）
-- mainブランチへの直pushは禁止（PR経由）
 - 秘密情報を含むファイルは絶対にcommitしない
 
 ## テスト方針
