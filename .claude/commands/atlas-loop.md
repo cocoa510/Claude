@@ -10,6 +10,7 @@
 - `--target-score <S>` — 目標スコア（デフォルト: 0.75）
 - `--types <type1,type2,...>` — 戦略タイプローテーション順序を明示指定
 - `--no-rotate` — タイプ自動ローテーションを無効化（系統廃棄時にループ停止）
+- `--direction <bias>` — 方向制約（`any` / `long_only` / `short_only` / `balanced`）。デフォルト: `any`。Period Bias対策でSHORT戦略を強制生成する場合に `short_only` を指定
 - `--dry-run` — 実行計画のみ表示（実行しない）
 - 例: `trend_following USDJPY --max-generations 5`
 - 例: `trend_following USDJPY --types trend_following,breakout,mean_reversion`
