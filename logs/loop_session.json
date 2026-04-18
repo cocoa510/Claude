@@ -5,10 +5,11 @@
   "threshold_pct": 94,
   "direction_bias": "any",
   "available_types": ["trend_following", "mean_reversion", "breakout", "momentum", "volatility", "hybrid"],
-  "current_type": "mean_reversion",
-  "current_gen_id": "ATLAS-2026-0418-003",
-  "current_step": "generate",
-  "step_started_at": "2026-04-18T12:10:00Z",
+  "current_type": "volatility",
+  "current_gen_id": "ATLAS-2026-0418-004",
+  "current_step": "abandoned_l2_fail",
+  "step_started_at": "2026-04-18T18:38:00Z",
+  "phase1_status": "all_5_types_abandoned",
   "target_score": 0.75,
   "max_generations": 10,
   "generations_in_lineage": 0,
@@ -16,10 +17,10 @@
   "last_alert": null,
   "matrix_cell": {
     "phase": 1,
-    "instrument": "EUR_JPY",
+    "instrument": "EUR_USD",
     "timeframe": "M15",
-    "strategy_type": "mean_reversion",
-    "priority_note": "Phase1 #1 優先度（memory）。EUR_JPY M15 mean_reversion は未試行セル、USD_JPY mean_rev Gen041/065 からの移植候補"
+    "strategy_type": "volatility",
+    "priority_note": "未試行セル。volatility は USD_JPY レンジ相場で Sharpe -0.7〜-0.8 失敗、EUR_USD の方向性ある動きに期待"
   },
   "exclusion_list": [
     {"cell": "GBP_USD|M15|breakout|long_only", "reason": "Gen019/020 連続 L1 FAIL、next_action_on_fail で除外指定"}
@@ -47,11 +48,12 @@
       "abandon_reason": "USD_JPY M15 で Sharpe -1.1、Gen009 で PF 0.32 に急落"
     },
     "volatility": {
-      "lineages": ["ATLAS-2026-0417-006", "ATLAS-2026-0417-007"],
-      "best_pf": 0.8861,
-      "best_sharpe": -0.8569,
+      "lineages": ["ATLAS-2026-0417-006", "ATLAS-2026-0417-007", "ATLAS-2026-0418-004"],
+      "best_pf": 1.235,
+      "best_sharpe": 0.447,
+      "best_l2_sharpe": -0.4798,
       "result": "abandoned",
-      "abandon_reason": "USD_JPY M15 で Sharpe 負値、PF<0.9 固定"
+      "abandon_reason": "Gen023 EUR_USD M15 BB Squeeze で L1 PASS (Sharpe 0.447) も L2 FAIL (Sharpe -0.48 / MaxDD 25.55%)、L1/L2 drift 36.49%、Secondary period Sharpe -1.22。devil-advocate の inflation 1.185x 警告が的中"
     },
     "breakout": {
       "lineages": ["ATLAS-2026-0417-016", "ATLAS-2026-0417-017", "ATLAS-2026-0417-019", "ATLAS-2026-0418-001", "ATLAS-2026-0418-002"],
