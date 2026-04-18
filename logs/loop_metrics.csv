@@ -1,2 +1,3 @@
 session_id,generation_id,generation_num,duration_sec,phase_validate_sec,phase_bt_sec,phase_metrics_sec,phase_eval_sec,gate_result,final_score,converge_result,schema_version
 ATLAS-LOOP-2026-0418-002,ATLAS-2026-0418-002,1,480,12,28,0,2,failed,null,abandoned_l1_fail,4.7.0
+ATLAS-LOOP-2026-0418-002,ATLAS-2026-0418-003,2,420,11,34,0,1,failed,null,abandoned_l1_fail,4.7.0

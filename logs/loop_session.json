@@ -5,10 +5,10 @@
   "threshold_pct": 94,
   "direction_bias": "any",
   "available_types": ["trend_following", "mean_reversion", "breakout", "momentum", "volatility", "hybrid"],
-  "current_type": "breakout",
-  "current_gen_id": "ATLAS-2026-0418-002",
+  "current_type": "mean_reversion",
+  "current_gen_id": "ATLAS-2026-0418-003",
   "current_step": "generate",
-  "step_started_at": "2026-04-18T12:00:00Z",
+  "step_started_at": "2026-04-18T12:10:00Z",
   "target_score": 0.75,
   "max_generations": 10,
   "generations_in_lineage": 0,
@@ -16,10 +16,10 @@
   "last_alert": null,
   "matrix_cell": {
     "phase": 1,
-    "instrument": "USD_JPY",
+    "instrument": "EUR_JPY",
     "timeframe": "M15",
-    "strategy_type": "breakout",
-    "priority_note": "Phase1 #3 優先度（memory project_atlas_phase1_matrix）。USD_JPY M15 breakout は未試行セル"
+    "strategy_type": "mean_reversion",
+    "priority_note": "Phase1 #1 優先度（memory）。EUR_JPY M15 mean_reversion は未試行セル、USD_JPY mean_rev Gen041/065 からの移植候補"
   },
   "exclusion_list": [
     {"cell": "GBP_USD|M15|breakout|long_only", "reason": "Gen019/020 連続 L1 FAIL、next_action_on_fail で除外指定"}
@@ -33,11 +33,11 @@
       "abandon_reason": "EUR_JPY/EUR_USD/GBP_USD M15 全て L1 FAIL、Sharpe<0.3 収束"
     },
     "mean_reversion": {
-      "lineages": ["ATLAS-2026-0417-010", "ATLAS-2026-0417-011", "ATLAS-2026-0417-012"],
-      "best_pf": 0.6706,
-      "best_sharpe": -0.3808,
+      "lineages": ["ATLAS-2026-0417-010", "ATLAS-2026-0417-011", "ATLAS-2026-0417-012", "ATLAS-2026-0418-003"],
+      "best_pf": 0.9615,
+      "best_sharpe": -0.1317,
       "result": "abandoned",
-      "abandon_reason": "EUR_USD M15 で PF<0.7、Sharpe 負値固定"
+      "abandon_reason": "EUR_USD/EUR_JPY M15 で PF<1.0、Sharpe<0.3。Gen041/065 からの EUR_JPY 移植でも Sharpe -0.13（境界だが閾値未達）"
     },
     "momentum": {
       "lineages": ["ATLAS-2026-0417-008", "ATLAS-2026-0417-009"],
