@@ -1,0 +1,110 @@
+{
+  "reviewer": "devil-advocate",
+  "phase": "3b_design_review",
+  "note": "Phase 3b follow-up: PA-003 re-reviewed after fix design appended to fix_designs.json. Verdict updated from abandon_recommendation.",
+  "approved_count": 1,
+  "conditional_count": 4,
+  "abandoned_count": 0,
+  "reviews": [
+    {
+      "finding_id": "QA-003",
+      "verdict": "approved_with_conditions",
+      "concerns": [
+        "SEMANTIC INVERSION: Removing the legacy_pass exclusion reverses the explicit design decision at dedup.py:384-387 (added to prevent Gen41/65 2 legacy entries from blocking new strategies). After fix, 2 legacy + 1 new fills cap=3, leaving 0 slots. No new rationale for reversal.",
+        "RETROACTIVE STATE GAP: 32 existing cluster members retain overall_passed=true in DB. 29 overflow members mislead downstream consumers. No migration proposed.",
+        "GOLDEN FIXTURE CLAIM UNVERIFIED: runner.py:833-851 mutates overall_passed when is_duplicate=True. Design asserts golden fixtures unaffected without fixture-level audit.",
+        "GATE_CHECK KEY INJECTION: Inserting cluster_cap_exceeded into gate_check may break parsers that enumerate a closed set of gate keys."
+      ],
+      "conditions": [
+        "Audit cluster_strategies (dedup.py:296) to confirm whether legacy entries occupy cap slots. Reconcile with rationale at dedup.py:384-387 before removing legacy exclusion.",
+        "Propose data migration or flag for 29 overflow strategies so historical overall_passed=true records are not misleading.",
+        "Run pytest tests/golden/ before and after runner.py change and confirm zero new failures.",
+        "Verify cluster_cap_exceeded insertion into gate_check does not break atlas history/status parsers."
+      ],
+      "phase4_watch_items": [
+        "Confirm next gate-pass attempt at cluster attempt 4 correctly returns is_duplicate=True.",
+        "Verify check_cluster_saturation() pre-generation uses same legacy semantics as fixed check_duplicate."
+      ],
+      "rationale": "Core bug confirmed (runner.py:834-846 WARN-only). Fix direction correct. Conditions address semantic reversal risk and retroactive state integrity."
+    },
+    {
+      "finding_id": "RE-001",
+      "verdict": "approved_with_conditions",
+      "concerns": [
+        "FAIL-CLOSED RESTART LOOP: Redis unavailability at restart causes permanent startup failure in systemd-auto-restart. Creates a new safety gap: infinite crash loop with no trade execution. Design acknowledges as known risk but proposes no monitoring hook or degraded-mode.",
+        "KILL SWITCH RESTORE FRAGILITY: restore_from_state relies on single shared RiskState instance. Fresh RiskState in any code path loses the restored is_active flag silently.",
+        "LOAD_ALL_ORDERS PREFIX UNVERIFIED: SCAN MATCH state:orders:* pattern is from pseudo_diff only. Actual prefix constants in redis_store.py:89-137 not confirmed against real code.",
+        "POSITION RESTORE BEFORE RECONCILER: Restored VirtualPositions may diverge from OANDA state if positions were manually closed during downtime. Reconciler alerts but does not auto-correct."
+      ],
+      "conditions": [
+        "Define explicit behavior for Redis unavailability: degraded-mode start with KillSwitch pre-activated, or documented operator recovery procedure. Do not rely on silent crash loop.",
+        "Confirm actual redis_store.py prefix constants match SCAN patterns before implementing load_all_orders/load_all_positions.",
+        "In test_crash_recovery.py use a FRESH RiskState instance for second Coordinator to confirm restore works across real object boundaries.",
+        "Add post-recovery structured log listing restored order IDs and position IDs."
+      ],
+      "phase4_watch_items": [
+        "Test startup with Redis not running: confirm clean error output, not raw exception traceback.",
+        "Confirm PositionReconciler does not double-count positions restored by recover_state on first run."
+      ],
+      "rationale": "CRITICAL gap confirmed. Fix architecture correct. Conditions address the new fail-closed restart loop risk (safety regression created by the fix) and prefix verification that could make fix a silent no-op."
+    },
+    {
+      "finding_id": "RE-002",
+      "verdict": "approved",
+      "concerns": [
+        "test_ptrc_post_ordering.py should assert unrealized_pnl value in addition to daily_realized_pnl to fully verify post-close state passed to PTRC-Post.",
+        "persist_risk_state on every closing fill creates Redis write bursts during news-event stop-out cascades. Throttling marked optional in design but should be a production-monitored decision."
+      ],
+      "conditions": [],
+      "phase4_watch_items": [
+        "Run all existing test_coordinator_flow.py tests and confirm none depend on old PTRC-before-PnL ordering.",
+        "Monitor Redis write latency under simulated fill bursts in staging before production promotion."
+      ],
+      "rationale": "Clean sequential reorder. Bug confirmed at coordinator.py:397-411. No logic changes, only ordering. Test plan covers critical threshold-crossing scenario. Approved without conditions."
+    },
+    {
+      "finding_id": "RE-008",
+      "verdict": "approved_with_conditions",
+      "concerns": [
+        "DOCUMENTED DESIGN REVERSAL: ptrc.py:317 documents current fail-open as intentional (nakerebana 0 atsukai). Fix reverses this without updating the comment, creating contradictory documentation.",
+        "EXISTING TEST RED RISK UNDERSPECIFIED: Design labels any red tests as specification violation without enumerating them first. Scope may expand.",
+        "TYPE DUALITY NOT FIXED: _resolve_reference_price patches around inconsistent context_snapshot type (object vs dict) without fixing root cause.",
+        "MARKET ORDER EDGE CASE: order.price=None with no context_snapshot causes fail-safe REJECT for market orders if coordinator wiring fails. Runtime reject is fragile versus startup assertion."
+      ],
+      "conditions": [
+        "Update ptrc.py:317 docstring to replace the fail-open description with the new fail-safe policy before committing.",
+        "Run existing test_ptrc.py before implementation and document each failing test with explicit specification-violation justification before modifying.",
+        "Add type annotation context_snapshot: TradeContextSnapshot | None to Order model and remove isinstance(snap, dict) branch."
+      ],
+      "phase4_watch_items": [
+        "Confirm coordinator.py:202-206 always sets valid price in context_snapshot. Consider PRODUCTION-mode startup assertion.",
+        "Monitor PTRC rejection rate for reason=reference_price_unavailable in staging."
+      ],
+      "rationale": "Fail-open confirmed at ptrc.py:321-329. _resolve_reference_price abstraction is sound. Conditions address documentation debt and type consistency."
+    },
+    {
+      "finding_id": "PA-003",
+      "verdict": "approved_with_conditions",
+      "review_note": "Phase 3b follow-up. Design now present as 5th entry in fix_designs.json. Code verified: snapshot_writer.py:35-94 (write_or_raise, threading.Lock, os.fsync confirmed), coordinator.py:61/80 (self._snapshot_writer=snapshot_writer, no guard), coordinator.py:287-310 (dead-code branch confirmed), main.py:330-342 (snapshot_writer kwarg absent confirmed), settings.py:1-210 (field is env:Environment enum, no model_validator present). Previous abandon was solely due to missing design.",
+      "concerns": [
+        "ENVIRONMENT FIELD MISMATCH (IMPLEMENTATION DEFECT, CONFIRMED): settings.py:31 declares field as env:Environment (enum). Design model_validator checks self.environment==production against a non-existent attribute. AttributeError at runtime, guard entirely bypassed. Even with correct field name, string production != Environment.PRODUCTION enum member.",
+        "SYNC FSYNC IN ASYNCIO TASK (CONFIRMED): snapshot_writer.py:76-81 calls f.flush()+os.fsync(f.fileno()) under threading.Lock, all synchronously. coordinator.py:289 calls write_or_raise() with no executor wrapper inside async coroutine. Blocks event loop on every order. Design claims <2ms with no profiling basis.",
+        "COORDINATOR DOUBLE-BARRIER IS COMMENT NOT CODE (CONFIRMED): coordinator.py:80 is self._snapshot_writer=snapshot_writer with no guard. Pseudo_diff states BT/unit-test compat explicitly. Any construction path bypassing TradingPlatform.start() leaves snapshot_writer=None silently.",
+        "NO UNIT TEST FOR WIRING FACT: All 6 test cases require TradingPlatform.start() with full stack. No lightweight test confirms coordinator._snapshot_writer is not None, nor that write_or_raise is called at coordinator.py:289 on order submission.",
+        "DISK-FULL STARTUP FAILURE HAS NO OPERATOR PATH: snapshot_required=True causes start() to raise if SnapshotWriter init fails. No degraded-mode or recovery procedure documented for disk-full/permission-denied during live session."
+      ],
+      "conditions": [
+        "MANDATORY FIRST: Fix model_validator to check self.env==Environment.PRODUCTION (enum, correct field name). Add test_production_forbids_snapshot_required_false and confirm ValidationError fires before any other implementation work.",
+        "MANDATORY: Wrap write_or_raise at coordinator.py:289 in run_in_executor or rewrite SnapshotWriter with aiofiles. Replace <2ms claim with measured p99 from production host disk.",
+        "MANDATORY: Add two unit tests not requiring TradingPlatform.start(): (a) coordinator with snapshot_writer=None submits fake order, assert write_or_raise not called; (b) coordinator with SnapshotWriter on tmp_path submits fake order, assert write_or_raise called once with correct order_id.",
+        "Recommended: Remove misleading double-barrier comment from coordinator.__init__. Document None is accepted for BT compat and enforcement is caller responsibility."
+      ],
+      "phase4_watch_items": [
+        "Run test_production_forbids_snapshot_required_false as very first PA-003 task before coordinator or main.py changes.",
+        "Measure os.fsync p99 on production host disk. Above 5ms: executor wrapping is non-negotiable.",
+        "Confirm snapshot_writer.py:37 mkdir does not race with log-rotation agents removing parent dir between mkdir and first open."
+      ],
+      "rationale": "Finding confirmed valid: coordinator.py:61 defaults None, main.py:330-342 omits kwarg, coordinator.py:287 guard is dead code in production. Architectural direction correct. Two implementation defects in the design would cause silent production failures: (1) model_validator references self.environment which does not exist in settings.py; (2) os.fsync inside asyncio coroutine is confirmed blocking I/O. Both are concrete verifiable defects, not speculative. Approved with conditions because the fix structure is sound and both defects are precisely fixable."
+    }
+  ]
+}

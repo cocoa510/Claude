@@ -1,0 +1,258 @@
+{
+  "round": 1,
+  "designs": [
+    {
+      "finding_id": "QA-003",
+      "severity": "high",
+      "title": "is_duplicate=True が Gate PASS をブロックしない + cluster_strategies との legacy_pass 非対称",
+      "root_cause": "`check_duplicate()` は開発時 WARN-only として導入され、Gate PASS 遮断にリンクする実装が後回しのまま放置された。加えて check_duplicate のキャップ計数は legacy_pass を除外する一方、cluster_strategies は legacy を含めて capped_members を採るため、同一 CLUSTER_CAP_PER_GROUP 定数に対し二重の意味論が並存している。",
+      "fix": {
+        "files": [
+          {
+            "path": "ATLAS/atlas/backtest/runner.py",
+            "lines": "834-851",
+            "change": "`if result.overall_passed:` 節内で check_duplicate を呼び出し、dup.is_duplicate=True の場合に (a) result.overall_passed=False, (b) result.layer2.passed=False, (c) result.gate_check['passed']=False, (d) result.gate_check['failed_conditions'] に 'cluster_cap_exceeded' を追記する。logger.warning は logger.error 相当の構造化ログに格上げ（exc_info 相当で dup.matching_representative と dup.param_similarity を必ず含める）。"
+          },
+          {
+            "path": "ATLAS/atlas/analyzer/dedup.py",
+            "lines": "256-326 (cluster_strategies), 383-407 (check_duplicate)",
+            "change": "CLUSTER_CAP_PER_GROUP 計数ルールを両関数で一致させる。方針: `legacy_pass=True` も占有カウントに含める（check_duplicate 現行仕様を cluster_strategies 側に揃え、legacy を cap 占有として数える）。cluster_strategies では `capped = [m for m in ranked[:max_per_cluster]]` に legacy を含める現行挙動は保持しつつ、check_duplicate の same_cluster フィルタから `and not fp.legacy_pass` を削除し `len(same_cluster) >= CLUSTER_CAP_PER_GROUP` を共通セマンティクスに統一。これにより Gen41/65 ライブ運用 legacy 2 件 + 新規 1 件で飽和判定となり、cluster_strategies の capped_members と一致する。"
+          }
+        ]
+      },
+      "side_effect_analysis": {
+        "method": "logs/audit/round_1 の strategies dir を grep -l '\"overall_passed\": true' で列挙 + config.json/strategy.py から class×instrument×tf を抽出し、schema_version を読み取り cluster 毎に再シミュレーション。",
+        "gate_pass_total": 37,
+        "retroactive_fail_candidates": {
+          "cluster_key": "MeanReversionRSIBollingerLongOnlyStrategy|USD_JPY|M15",
+          "current_members": 32,
+          "schema_version_all": "1.1.0 (major<3 → legacy_pass=True)",
+          "impact_before_fix": "legacy_pass=True 扱いのため check_duplicate の same_cluster カウントは 0 件と誤認され、新規 PASS が無制限に膨張（実績 32 件）。",
+          "impact_after_fix": "(a) 既存 32 件は BT を再実行しない限り overall_passed=true のまま（runner.py 修正は新規 BT 実行時のみ適用）。(b) 次回の新規 PASS から cluster_cap=3 の運用が機能し、is_duplicate=True で却下される。(c) ランキング 4 位以下は legacy_pass のため代表にはならず overflow 扱い — FTS 誤投入リスクは 3 件までに収束。"
+        },
+        "other_clusters_unaffected": [
+          "TrendFollowingEmaPullbackStrategy||M15 (3件 — ちょうど cap, fix 後も PASS)",
+          "その他クラスター — 全て 1 件のみ"
+        ],
+        "golden_fixture_impact": "tests/golden/ 配下の check_backtest_gate 期待値は重複検出フェーズ（Gate ロジック後段）を含まないため、既存ゴールデンは無変更で PASS する想定。"
+      },
+      "change_classification": {
+        "type": "[fix:bug]",
+        "justification": "CLAUDE.md の Immutable Gate Protocol および 『同一 class_name×instrument×timeframe でGate PASSする戦略は最大3件』という既存仕様定義に実装が追随していなかっただけで、閾値・計算ロジック・メトリクス定義のいずれも変更しない。gate_check['passed'] の評価条件集合は変わらず、failed_conditions に既存 key 'cluster_cap_exceeded' を追加する可観測性拡張のみ。ゴールデン更新不要。"
+      },
+      "recurrence_prevention": {
+        "unit_test_file": "ATLAS/tests/unit/test_runner_duplicate_gate.py",
+        "test_name": "test_is_duplicate_blocks_overall_passed",
+        "assertions": [
+          "check_duplicate をモンキーパッチし DuplicateCheckResult(is_duplicate=True, matching_cluster='X|USD_JPY|M15', ...) を返させる",
+          "Gate 全条件が本来 PASS する BacktestResult を run_backtest 後段パイプライン（gate 評価後の重複検出分岐）に投入",
+          "assert result.overall_passed is False",
+          "assert result.layer2.passed is False",
+          "assert 'cluster_cap_exceeded' in result.gate_check['failed_conditions']",
+          "assert result.duplicate_check['is_duplicate'] is True"
+        ]
+      },
+      "test_plan": {
+        "pytest_command": "cd ATLAS && .venv/Scripts/python.exe -m pytest tests/unit/test_runner_duplicate_gate.py -v",
+        "additional_regression": [
+          "ATLAS/tests/unit/test_dedup_symmetry.py: check_duplicate.same_cluster count == cluster_strategies.capped_members count（同一 cluster_key に対する CLUSTER_CAP_PER_GROUP カウントの対称性を assert）",
+          "ATLAS/tests/golden/ 全件が再実行で GREEN（ロジック不変の証明）"
+        ]
+      }
+    },
+    {
+      "finding_id": "RE-001",
+      "severity": "critical",
+      "root_cause": "StateStore の load_* / save_risk_state / save_account_risk_state API がプロダクションパスから一切呼ばれておらず、クラッシュ再起動時に Kill Switch 状態・日次損益・オープン注文/ポジションが全てゼロ復帰し Hard Limit 防壁が実質無効化されている。",
+      "fix_summary": "ExecutionCoordinator にクラッシュ復旧ライフサイクル (recover_state) を追加し、main.py の start() で event_bus → health → coordinator.recover_state() → workers の順で呼ぶ。復旧順序は (1) AccountRiskState → KillSwitch 冪等復元、(2) RiskState → daily_realized_pnl/unrealized を復元（last_reset が前日なら reset_daily 扱い）、(3) 全 Order を load_all_orders() で走査し SUBMITTED/QUEUED のみ OrderManager に復元、(4) VirtualPosition を FillProcessor に注入。save 側の欠落も同時修正: daily_realized_pnl 加算直後と KillSwitch activate/deactivate 時と日次リセット時に save_risk_state / save_account_risk_state を呼ぶ。復旧失敗は fail-closed で起動中止。",
+      "patch_specification": {
+        "files": [
+          {
+            "path": "C:/data/制作物/claude/fx_trading_system/trading_platform/data/state_store/redis_store.py",
+            "lines": "89-137",
+            "action": "extend",
+            "pseudo_diff": "新 API 追加: load_all_orders() -> list[Order] および load_all_positions() -> list[VirtualPosition]。InMemoryBackend は self._strings を prefix=_PREFIX_ORDERS / _PREFIX_POSITIONS で走査。RedisBackend は SCAN MATCH state:orders:* / state:positions:* で列挙（KEYS コマンドは禁止）。復旧時のバッチ読み込みに必須。"
+          },
+          {
+            "path": "C:/data/制作物/claude/fx_trading_system/trading_platform/core/execution_engine/coordinator.py",
+            "lines": "new method after 133 (stop)",
+            "action": "add",
+            "pseudo_diff": "async def recover_state(self) -> None:\n  if self._state_store is None: return\n  # 1. AccountRiskState → KillSwitch 冪等復元\n  acc = await self._state_store.load_account_risk_state()\n  if acc is not None and acc.is_kill_switch_active and self._kill_switch is not None:\n    await self._kill_switch.restore_from_state(acc)  # 新 API: broker halt を再実行せず is_active のみ同期\n  # 2. RiskState（日次 PnL）\n  rs = await self._state_store.load_risk_state()\n  if rs is not None:\n    if rs.last_reset.date() >= datetime.now(timezone.utc).date():\n      self._risk_state.daily_realized_pnl = rs.daily_realized_pnl\n      self._risk_state.daily_unrealized_pnl = rs.daily_unrealized_pnl\n      if rs.is_kill_switch_active:\n        RiskState._set_kill_switch_active(self._risk_state, True)\n    # 前日なら reset_daily 相当の空状態で起動（KS 状態のみ保持）\n  # 3. Orders（SUBMITTED/QUEUED のみ、FILLED/REJECTED は再生しない）\n  orders = await self._state_store.load_all_orders()\n  for o in orders:\n    if o.state in {OrderState.SUBMITTED, OrderState.QUEUED}:\n      self._order_manager.restore_order(o)  # 新 API: 状態機械に登録のみ\n  # 4. Positions\n  positions = await self._state_store.load_all_positions()\n  for p in positions:\n    if not p.is_flat:\n      self._fill_processor.restore_position(p)  # 新 API\n  logger.info('State 復旧完了', orders=len(orders), positions=len(positions), ks=self._risk_state.is_kill_switch_active)\n# 例外は握りつぶさず raise。main.py の _start_step が rollback する（fail-closed）。"
+          },
+          {
+            "path": "C:/data/制作物/claude/fx_trading_system/trading_platform/core/execution_engine/coordinator.py",
+            "lines": "new helper + call sites near 163/411",
+            "action": "extend",
+            "pseudo_diff": "async def _persist_risk_state(self) -> None:\n    if self._state_store is None: return\n    try: await self._state_store.save_risk_state(self._risk_state)\n    except Exception as e: logger.error('RiskState 永続化失敗', error=str(e))\n# 呼出箇所: (a) _maybe_reset_daily の reset_daily 直後、(b) RE-002 修正後の daily_realized_pnl += realized_pnl 直後、(c) _update_unrealized_pnl 末尾（オプション: 書き込み頻度抑制のためフラグで間引き可）"
+          },
+          {
+            "path": "C:/data/制作物/claude/fx_trading_system/trading_platform/core/risk_engine/circuit_breaker.py",
+            "lines": "KillSwitch._activate / _deactivate / new restore_from_state",
+            "action": "extend",
+            "pseudo_diff": "_activate 末尾に state_store があれば save_account_risk_state(AccountRiskState(is_kill_switch_active=True, ...)) を呼ぶ配線を追加。新 API restore_from_state(acc: AccountRiskState): is_active=True 設定と RiskState._set_kill_switch_active(True) のみ行い、broker halt / order cancel / retry stop は再実行しない（冪等復元）。再起動直後の PTRC circuit_breaker チェックで新規発注を拒否する流れに依存する設計。"
+          },
+          {
+            "path": "C:/data/制作物/claude/fx_trading_system/trading_platform/main.py",
+            "lines": "around 555-562 (coordinator start step) + 347-351 (register_components)",
+            "action": "extend",
+            "pseudo_diff": "(1) coordinator.start 直後・workers.start 前に新ステップ挿入:\n  await _start_step('state_recovery', coordinator.recover_state, None)\n失敗時 rollback で起動中止（fail-closed）。\n(2) kill_switch.register_components に state_store=self._state_store を追加し、_activate/_deactivate から save_account_risk_state 呼出を可能にする。"
+          }
+        ]
+      },
+      "side_effects": [
+        "並行性: recover_state は workers 起動前の直列実行でシグナル/Tick 発火前に完了する。競合なし。",
+        "バックワード互換: state_store=None の BT/テスト経路は no-op で従来通り。",
+        "Redis 未起動時: load_* の例外は fail-closed で起動中止（安全側）。DE-007 の TTL/retry 欠如は本 Round 対象外で既知残リスク。",
+        "KillSwitch 冪等復元: broker halt 等を再実行しないため、再起動中に手動発注された場合は PTRC circuit_breaker 経路 (is_kill_switch_active=True) で拒否する設計に依存。",
+        "BT/Live parity: BT パス (event_simulator) は ExecutionCoordinator 非経由のため影響ゼロ。"
+      ],
+      "recurrence_prevention": {
+        "type": "test",
+        "path": "C:/data/制作物/claude/fx_trading_system/tests/execution/test_crash_recovery.py",
+        "description": "プロセス再起動シナリオ統合テスト: 共有 InMemoryBackend StateStore で KillSwitch 発動 → save_account_risk_state 検証 → Coordinator インスタンス破棄 → 新規生成 → recover_state 呼出 → 新 RiskState.is_kill_switch_active==True と daily_realized_pnl が復元されていることを assert → 発注試行で PTRC_circuit_breaker により拒否されることを assert。QT-006 要件も兼ねる。"
+      },
+      "test_plan": [
+        "pytest tests/execution/test_crash_recovery.py::test_kill_switch_survives_restart — KS 活性→再起動後 is_kill_switch_active==True",
+        "pytest tests/execution/test_crash_recovery.py::test_daily_pnl_restored — daily_realized_pnl=-9.5% 保存→再起動後同値復元",
+        "pytest tests/execution/test_crash_recovery.py::test_daily_pnl_day_boundary_resets — last_reset が前日なら復元せずリセット扱い",
+        "pytest tests/execution/test_crash_recovery.py::test_open_orders_restored — state=SUBMITTED の Order 3 件 → 再起動後 OrderManager.get_order() で取得可能",
+        "pytest tests/execution/test_crash_recovery.py::test_virtual_positions_restored — VirtualPosition 保存→FillProcessor.get_all_positions で取得可能、PTRC exposure に反映",
+        "pytest tests/execution/test_crash_recovery.py::test_recovery_failure_fails_closed — load_account_risk_state が raise → start() が rollback して起動中止"
+      ],
+      "parity_impact": "none"
+    },
+    {
+      "finding_id": "RE-002",
+      "severity": "critical",
+      "root_cause": "coordinator.py の fill 処理で _run_post_trade_risk が daily_realized_pnl 加算より前に呼ばれるため PTRC-Post および KillSwitch Level 3（15%）判定が常に 1 fill 遅延し、-14.9% → -16% の敷居越え fill で KS が発動しない。",
+      "fix_summary": "coordinator.py fill 処理シーケンスを並べ替え、`daily_realized_pnl += realized_pnl` と total_exposure 更新 と `_update_unrealized_pnl()` を _run_post_trade_risk 呼出より前に移動する。これにより PTRC-Post は『当該 fill を含む最新 risk_state』を参照する。RE-001 修正の _persist_risk_state() は並べ替え後の加算直後で呼び出す。",
+      "patch_specification": {
+        "files": [
+          {
+            "path": "C:/data/制作物/claude/fx_trading_system/trading_platform/core/execution_engine/coordinator.py",
+            "lines": "384-414",
+            "action": "reorder",
+            "pseudo_diff": "現行:\n  position = self._fill_processor.process_fill(...)\n  self._fills_completed += 1\n  await self._persist_order(order)\n  await self._persist_position(position)\n  await self._run_post_trade_risk(order, fill_result.fill_price)   # ← 遅延原因\n  self._risk_state.total_exposure = sum(...)\n  if realized_pnl is not None:\n      self._risk_state.daily_realized_pnl += realized_pnl            # ← 加算が後\n  self._update_unrealized_pnl()\n\n変更後:\n  position = self._fill_processor.process_fill(...)\n  self._fills_completed += 1\n  await self._persist_order(order)\n  await self._persist_position(position)\n  # RE-002: PTRC-Post が daily_pnl を読む前に必ず加算する\n  if realized_pnl is not None:\n      self._risk_state.daily_realized_pnl += realized_pnl\n  self._risk_state.total_exposure = sum(\n      p.quantity for p in self._fill_processor.get_all_positions() if not p.is_flat\n  )\n  self._update_unrealized_pnl()\n  await self._persist_risk_state()  # RE-001 連携\n  await self._run_post_trade_risk(order, fill_result.fill_price)   # ← 加算後に評価"
+          }
+        ]
+      },
+      "side_effects": [
+        "並行性: fill ハンドラは単一の async タスクで逐次処理されるため race 無し。",
+        "バックワード互換: PTRC-Post 評価に渡す RiskState の意味が『この fill を含む最新値』へ変わる。これは仕様上の正解で ptrc_post.py の期待と一致。",
+        "エントリ fill (realized_pnl=None) は加算スキップで挙動不変。決済 fill のみ順序変更の効果を受ける。",
+        "FillEvent 発行は _run_post_trade_risk の後で順序変更の影響なし。",
+        "BT/Live parity: BT (event_simulator) は ExecutionCoordinator 非経由のため影響ゼロ。"
+      ],
+      "recurrence_prevention": {
+        "type": "test",
+        "path": "C:/data/制作物/claude/fx_trading_system/tests/risk_engine/test_ptrc_post_ordering.py",
+        "description": "PTRC-Post 評価時点の daily_realized_pnl が『当該 fill を含む』値であることを直接 assert する単体テスト。スパイされた PostTradeRiskControl.evaluate_fill() が呼ばれた瞬間の risk_state.daily_realized_pnl を捕捉し、当該 fill の realized_pnl が既に加算済みであることを検証する。同シナリオで -14.9% → -16% 閾値越えで KillSwitch.evaluate_and_activate() が同一 fill 内で呼ばれることも assert（QT-002 カバレッジ要件を兼ねる）。"
+      },
+      "test_plan": [
+        "pytest tests/risk_engine/test_ptrc_post_ordering.py::test_daily_pnl_incremented_before_post_trade — evaluate_fill 呼出時の daily_realized_pnl に当該 fill 分を含むことを assert",
+        "pytest tests/risk_engine/test_ptrc_post_ordering.py::test_ks_fires_on_threshold_crossing_fill — 初期 pnl=-14.9%、決済 fill で -16% 到達した fill 自身で KillSwitch.evaluate_and_activate が呼ばれる",
+        "pytest tests/risk_engine/test_ptrc_post_ordering.py::test_entry_fill_does_not_affect_pnl — realized_pnl=None の fill で daily_realized_pnl 不変",
+        "pytest tests/execution/test_coordinator_flow.py 既存回帰 — FillEvent 発行・stats 更新が従来通り動作"
+      ],
+      "parity_impact": "none"
+    },
+    {
+      "finding_id": "RE-008",
+      "severity": "high",
+      "root_cause": "_check_total_exposure は context_snapshot の参照価格欠損時に ref_price=0.0 を default として続行し new_order_notional=0 となり常に exposure_ratio チェックを素通りさせる fail-open。一方 _check_margin は同条件で REJECT する fail-safe となっており PTRC 内で方針が分裂している。",
+      "fix_summary": "_check_total_exposure の参照価格解決ロジックを _check_margin と同一パターン (order.price → context_snapshot.price → order.fill_price の順) に置き換え、価格が取得できない場合は fail-safe REJECT する。ref_price=0.0 の default は撤廃。解決処理を共通 staticmethod `_resolve_reference_price(order) -> float | None` に抽出し _check_total_exposure / _check_margin 双方で呼び出して単一の真実源とする。",
+      "patch_specification": {
+        "files": [
+          {
+            "path": "C:/data/制作物/claude/fx_trading_system/trading_platform/core/risk_engine/ptrc.py",
+            "lines": "new staticmethod (around 300)",
+            "action": "add",
+            "pseudo_diff": "@staticmethod\ndef _resolve_reference_price(order: Order) -> float | None:\n    '''FTS-RE-008: 参照価格を order.price → context_snapshot.price → order.fill_price の順で解決する共通ヘルパ。\n    TotalExposure / Margin 双方で使い fail-safe ポリシーを統一する。'''\n    if order.price is not None and order.price > 0:\n        return float(order.price)\n    snap = order.context_snapshot\n    if snap is not None:\n        snap_price = getattr(snap, 'price', None)\n        if snap_price is None and isinstance(snap, dict):\n            snap_price = snap.get('price')\n        if isinstance(snap_price, (int, float)) and snap_price > 0:\n            return float(snap_price)\n    if order.fill_price is not None and order.fill_price > 0:\n        return float(order.fill_price)\n    return None"
+          },
+          {
+            "path": "C:/data/制作物/claude/fx_trading_system/trading_platform/core/risk_engine/ptrc.py",
+            "lines": "321-343",
+            "action": "replace",
+            "pseudo_diff": "現行 ref_price=0.0 default ブロックを削除し以下に置換:\n  ref_price = self._resolve_reference_price(order)\n  if ref_price is None:\n      return PTRCCheck(\n          check_type=PTRCCheckType.TOTAL_EXPOSURE,\n          passed=False,\n          details={\n              'instrument': order.instrument,\n              'order_quantity': order.quantity,\n              'reason': 'reference_price_unavailable',\n          },\n          message=(\n              f'{order.instrument} の参照価格が取得できず、総エクスポージャーを '\n              '算出できません — fail-safe で拒否'\n          ),\n      )\n  new_order_notional = order.quantity * ref_price\n  # 以降の existing_notional / exposure_ratio 計算は変更なし"
+          },
+          {
+            "path": "C:/data/制作物/claude/fx_trading_system/trading_platform/core/risk_engine/ptrc.py",
+            "lines": "446-456",
+            "action": "refactor",
+            "pseudo_diff": "_check_margin 内の ref_price 解決ブロック (order.price → snap.price → fill_price) を _resolve_reference_price(order) 呼出に置換。既存 fail-safe REJECT ロジックは維持（挙動不変リファクタ）。"
+          }
+        ]
+      },
+      "side_effects": [
+        "並行性: PTRC は同期関数で状態を持たず、ヘルパ追加に影響なし。",
+        "バックワード互換: context_snapshot.price が常に設定される正常経路では挙動不変（coordinator.py:202-206 で必ず price を渡す）。欠損経路のみ挙動が『素通り』→『拒否』へ変化 — fail-safe 方針に合致。",
+        "既存テスト: context_snapshot なしで _check_total_exposure が PASS することを期待しているテストがあれば赤化。それは仕様違反テストなので修正対象。",
+        "BT/Live parity: ATLAS BT は PTRC を経由しない。Live も TradeContextSnapshot を必ず付与するためパリティ影響なし。"
+      ],
+      "recurrence_prevention": {
+        "type": "contract",
+        "path": "C:/data/制作物/claude/fx_trading_system/tests/risk_engine/test_ptrc_fail_safe_parity.py",
+        "description": "契約テスト: _check_margin と _check_total_exposure の両方を同一の無効な Order（context_snapshot=None, price=None, fill_price=None）で駆動し、両者が passed=False かつ details['reason']=='reference_price_unavailable' を返すことを assert する。将来どちらか片方が fail-open に戻った場合に CI が赤くなる。_resolve_reference_price の parametrize 単体テストも併設し優先順位を固定化する。"
+      },
+      "test_plan": [
+        "pytest tests/risk_engine/test_ptrc_fail_safe_parity.py::test_missing_price_rejects_total_exposure — context_snapshot.price=None で passed=False",
+        "pytest tests/risk_engine/test_ptrc_fail_safe_parity.py::test_missing_price_rejects_margin — 同条件で _check_margin も passed=False",
+        "pytest tests/risk_engine/test_ptrc_fail_safe_parity.py::test_both_use_same_reference_price — 有効価格ケースで _check_total_exposure と _check_margin が同一 ref_price を内部使用（details 経由検証）",
+        "pytest tests/risk_engine/test_ptrc_fail_safe_parity.py::test_resolve_reference_price_precedence — order.price > context_snapshot.price > fill_price の優先順位を parametrize で検証",
+        "pytest tests/risk_engine/test_ptrc.py 既存回帰 — 正常経路で PTRC 全体の approved/rejected 判定が不変"
+      ],
+      "parity_impact": "none"
+    },
+    {
+      "finding_id": "PA-003",
+      "severity": "high",
+      "title": "ExecutionCoordinator に SnapshotWriter が配線されず Trade Context Snapshot 永続化の fail-closed ゲートが死んでいる",
+      "root_cause": "coordinator.py:61 で `snapshot_writer` パラメータが `None` デフォルトに設定され、coordinator.py:287 の fail-closed 永続化分岐は `self._snapshot_writer is not None` の時のみ発火する。ところが main.py:330-342 の ExecutionCoordinator 構築時に `snapshot_writer` キーワード引数が渡されていないため、実運用系では常に `None` が注入され監査証跡の fail-closed ゲートが dead code 化している。FTS の CLAUDE.md:130 は Trade Context Snapshot の強制永続化を必須要件として規定しており、現状は仕様違反。設定側にも `snapshot_log_path` および `snapshot_required` フィールドが PlatformSettings に未定義で、配線のためには設定スキーマ拡張も必要。",
+      "fix": {
+        "files": [
+          {
+            "path": "C:/data/制作物/claude/fx_trading_system/trading_platform/config/settings.py",
+            "lines": "PlatformSettings 本体および model_validator ブロック",
+            "action": "extend",
+            "pseudo_diff": "PlatformSettings に以下 2 フィールドを追加:\n  snapshot_log_path: Path = Field(\n      default=Path('logs/trade_context/snapshots.jsonl'),\n      description='PA-003: Trade Context Snapshot JSONL 永続化先パス'\n  )\n  snapshot_required: bool = Field(\n      default=True,\n      description='PA-003: True の場合 SnapshotWriter 未配線で起動中止 (fail-closed)'\n  )\n# model_validator(mode='after') に production ガードを追加:\n  if self.environment == 'production' and self.snapshot_required is False:\n      raise ValueError(\n          'production 環境で snapshot_required=False は禁止 — '\n          '監査証跡 fail-closed ゲートの無効化は CLAUDE.md:130 違反'\n      )"
+          },
+          {
+            "path": "C:/data/制作物/claude/fx_trading_system/trading_platform/main.py",
+            "lines": "329-342 (KillSwitch 構築直後〜ExecutionCoordinator 構築)",
+            "action": "extend",
+            "pseudo_diff": "import 追加:\n  from trading_platform.data.trade_context.snapshot_writer import SnapshotWriter\n\n# KillSwitch 構築完了後、ExecutionCoordinator 構築直前 (line 329→330 境界) に挿入:\n  # PA-003: Trade Context Snapshot 永続化ライター配線\n  try:\n      self._snapshot_writer = SnapshotWriter(\n          log_path=self._settings.snapshot_log_path,\n      )\n  except Exception as e:\n      logger.error('SnapshotWriter 初期化失敗', error=str(e), path=str(self._settings.snapshot_log_path))\n      if self._settings.snapshot_required:\n          raise  # fail-closed: 起動中止\n      self._snapshot_writer = None\n\n# ExecutionCoordinator 構築を修正:\n  self._coordinator = ExecutionCoordinator(\n      event_bus=self._event_bus,\n      order_manager=self._order_manager,\n      ptrc=self._ptrc,\n      fill_processor=self._fill_processor,\n      broker=self._broker,\n      risk_state=self._risk_state,\n      kill_switch=self._kill_switch,\n      state_store=self._state_store,\n      snapshot_writer=self._snapshot_writer,  # ← PA-003 追加\n  )"
+          },
+          {
+            "path": "C:/data/制作物/claude/fx_trading_system/trading_platform/core/execution_engine/coordinator.py",
+            "lines": "61 (__init__ シグネチャおよび先頭ガード)",
+            "action": "extend",
+            "pseudo_diff": "__init__ 末尾 (self._snapshot_writer = snapshot_writer の行の直後) に fail-closed ガードを追加:\n  # PA-003: production 相当のガード — 設定側で snapshot_required=True の場合、\n  # ExecutionCoordinator レベルでも未配線を拒否する二重防壁。\n  # settings を直参照せず呼出側責務で、snapshot_writer=None かつ\n  # snapshot_required=True が別途伝播された場合のみ raise する契約。\n  # 実際の config 強制は settings.model_validator と main.py:__init__ の\n  # SnapshotWriter 構築失敗時 raise で担保済み。ここでは None のまま\n  # 許容する (BT/ユニットテスト互換)。\n# ※ 既存 coordinator.py:287 の `if self._snapshot_writer is not None` 分岐は\n#   変更不要。main.py 側配線で None が入らなくなることで自動的に活きる。"
+          }
+        ]
+      },
+      "side_effects": [
+        "並行性: SnapshotWriter.write_or_raise は呼出ごとに fsync を行う同期 I/O だが、coordinator.py:287 の呼出箇所は signal→order 生成の asyncio タスク内で 1 フロー当たり 1 回のため、fsync レイテンシはレコード当たり < 2ms の想定で発注パイプラインに影響しない。buffered flush は不要。",
+        "バックワード互換: BT/ユニットテスト経路は ExecutionCoordinator を直接構築するため snapshot_writer=None デフォルトを維持 — 既存テスト無改修。",
+        "設定互換: 既存 .env および YAML に snapshot_log_path / snapshot_required が未定義でも Field のデフォルト値 (logs/trade_context/snapshots.jsonl, True) が適用されるため、production 起動は自動で fail-closed に。development/testing 環境で明示的に snapshot_required=False を設定した場合のみ従来挙動を踏襲可能。",
+        "production ガード: model_validator により production 環境で snapshot_required=False の設定を強制的に拒否する。設定ミスによる監査証跡サイレント欠落を防止。",
+        "ファイルシステム: snapshot_log_path の親ディレクトリが存在しない場合 SnapshotWriter 側で作成する既存挙動に依存。書込権限欠落は SnapshotWriter.__init__ が raise し main.py が fail-closed で起動中止。",
+        "BT/Live parity: ATLAS BT は ExecutionCoordinator を経由しないため影響ゼロ。"
+      ],
+      "recurrence_prevention": {
+        "type": "test",
+        "path": "C:/data/制作物/claude/fx_trading_system/tests/execution/test_snapshot_writer_wiring.py",
+        "description": "統合テスト: TradingPlatform.start() を tmp_path 配下の snapshot_log_path 付き PlatformSettings で起動 → MarketDataEvent 投入 → Strategy から SignalEvent 発行 → FillEvent 受信完了を await → tmp_path / 'snapshots.jsonl' ファイルが存在し、該当 order_id を含む JSONL レコードが 1 行以上書かれていることを assert。追加 assert: (a) 起動後 self._coordinator._snapshot_writer is not None、(b) snapshot_required=True かつ書込権限のない path で起動すると TradingPlatform.start() が例外を raise して停止 (fail-closed 検証)、(c) production 環境で snapshot_required=False 設定は PlatformSettings 構築時点で ValueError 発生。"
+      },
+      "test_plan": [
+        "pytest tests/execution/test_snapshot_writer_wiring.py::test_coordinator_receives_snapshot_writer — TradingPlatform 起動後 coordinator._snapshot_writer が SnapshotWriter インスタンスであることを assert",
+        "pytest tests/execution/test_snapshot_writer_wiring.py::test_signal_to_fill_persists_snapshot — signal→order→fill フローで snapshots.jsonl に order_id 含む行が追記されていることを assert",
+        "pytest tests/execution/test_snapshot_writer_wiring.py::test_fail_closed_on_writer_init_failure — snapshot_required=True で SnapshotWriter 初期化が失敗する設定で start() が例外 raise することを assert",
+        "pytest tests/execution/test_snapshot_writer_wiring.py::test_production_forbids_snapshot_required_false — environment=production かつ snapshot_required=False で PlatformSettings が ValidationError を raise",
+        "pytest tests/config/test_settings.py 既存回帰 — 新フィールド追加で既存 PlatformSettings 構築が破綻しないこと",
+        "pytest tests/execution/test_coordinator_flow.py 既存回帰 — snapshot_writer=None の既存ユニットテストが従来通り動作 (バックワード互換確認)"
+      ],
+      "parity_impact": "none",
+      "classification": "wiring_fix"
+    }
+  ]
+}

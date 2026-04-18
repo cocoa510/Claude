@@ -1,0 +1,39 @@
+{
+  "session_id": "AUDIT-2026-0417-001",
+  "session_start": "2026-04-17T00:00:00Z",
+  "limit_minutes": 300,
+  "threshold_pct": 94,
+  "target": "both",
+  "severity_threshold": "high",
+  "max_rounds": 2,
+  "max_fixes_per_round": 5,
+  "current_round": 2,
+  "rounds": [
+    {
+      "round": 1,
+      "findings_total": 50,
+      "validated": 48,
+      "rejected": 2,
+      "downgraded": 11,
+      "selected_for_fix": 5,
+      "fixed": 5,
+      "deferred": 43,
+      "verdict": "continue",
+      "fixes": [
+        {"id": "RE-002", "commit": "de75c08", "repo": "fts", "title": "coordinator daily_pnl reorder"},
+        {"id": "RE-008", "commit": "35612c5", "repo": "fts", "title": "shared _resolve_reference_price"},
+        {"id": "PA-003", "commit": "e4ef35e", "repo": "fts", "title": "SnapshotWriter fail-closed wiring"},
+        {"id": "QA-003", "commit": "b5ea676", "repo": "atlas", "title": "overall_passed flip on is_duplicate"},
+        {"id": "RE-001", "commit": "d99a425", "repo": "fts", "title": "state recovery from persisted store"}
+      ]
+    }
+  ],
+  "finding_history": {
+    "RE-001": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1},
+    "RE-002": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1},
+    "RE-008": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1},
+    "PA-003": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1},
+    "QA-003": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1}
+  },
+  "vibration_tracker": {}
+}

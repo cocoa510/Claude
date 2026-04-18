@@ -1,0 +1,112 @@
+{
+  "agent": "data-engineer",
+  "findings": [
+    {
+      "id": "DE-001",
+      "severity": "high",
+      "area": "feature_store",
+      "title": "FeatureStore 計算コードが ATLAS と FTS で完全二重実装されており、ドリフト検知が Parity テストに全面依存",
+      "description": "ATLAS `_SimpleFeatureStore` (vectorbt_engine.py:253-395) と FTS `LiveFeatureStore` (live_store.py:88-611) / `build_builtin_indicators` (indicators.py:17-236) は、17 個の組み込みインジケータを別モジュールで独立実装している。docs/SHARED_CONTRACT.md §4 は `意図的な二重実装` と明記し、Parity テスト (tests/parity/test_feature_store_parity.py) で 1e-10 許容差により突合せる運用。問題は (1) どちらかを変更した際の同期が完全に人手依存であり CI で片側更新が検知できないこと、(2) ATLAS に新インジケータが追加されても FTS 側 build_builtin_indicators の辞書 (indicators.py:218-236) に忘れなく追加される保証が無いこと、(3) ATLAS stochastic_d は k を再計算 (vectorbt_engine.py:530-536) するが FTS stochastic_d は _stochastic_k を呼び出す (indicators.py:186-189) — 現状は数値一致するが、一方の内部展開を変えた瞬間に Parity が壊れる。`price=M` など API パラメータも二重に書かれている (candle_fetcher 側は client.py:565、ATLAS 側は data_loader.py:167)。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/feature_store/indicators.py:17-236",
+        "fx_trading_system/trading_platform/data/feature_store/live_store.py:125-128",
+        "ATLAS/atlas/backtest/vectorbt_engine.py:253-556",
+        "fx_trading_system/docs/SHARED_CONTRACT.md:76-99"
+      ],
+      "suggested_fix": "(a) atlas.common.indicators パッケージを作成し、純関数群 (_ema/_sma/_rsi/_atr/_adx/_macd/_bollinger/_stochastic/_donchian) を ATLAS 側に一元化する。ATLAS `_build_builtin_indicators` と FTS `build_builtin_indicators` は両方ともそのパッケージから import する。(b) CI に `test_indicator_registry_parity.py` を追加し、ATLAS と FTS の組み込みインジケータキー集合と function id 一致を assert する。(c) 新インジケータ追加時に両側を同時に触る強制を hook で実現する。"
+    },
+    {
+      "id": "DE-002",
+      "severity": "high",
+      "area": "feature_store",
+      "title": "LiveFeatureStore warmup 完了判定が未実装で、不足バッファ時に NaN / 暫定値で signal が生成される",
+      "description": "LiveFeatureStore は `is_warmed_up` 相当のゲートが存在しない (live_store.py 全体で grep しても該当メソッド無し)。一方 BUFFER_SAFETY_FACTOR=50 (live_store.py:48) により、period=50 の EMA/ATR/ADX を使う戦略は `_effective_buffer_size = 2500` 必要。しかし stream_receiver.DEFAULT_INITIAL_WARMUP_BARS=300 (stream_receiver.py:49) なので起動直後の ~2200 バー分は EWM が未収束状態で generate_signal が呼ばれる。StrategyWorker._process_bar (worker.py:292-310) は `bars_processed` を区別せず常に `feature_store.get_all(bar_index)` → `generate_signal` を実行する。SHARED_CONTRACT §12.3 は 'warmup 完了監視の強化必須（DE-R1-004 相当）' として明示的に未解決と記述。period=200 EMA 戦略では必要 10000 本に対し warmup 300 で 33× 不足、Live 開始後 1 ヶ月以上 BT と乖離する。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/feature_store/live_store.py:37-52",
+        "fx_trading_system/trading_platform/data/market_data/stream_receiver.py:49",
+        "fx_trading_system/trading_platform/core/strategy_engine/worker.py:292-356",
+        "fx_trading_system/docs/SHARED_CONTRACT.md:322-331"
+      ],
+      "suggested_fix": "(1) LiveFeatureStore に `is_warmed_up(self) -> bool` を実装し、`len(self._bars[primary_tf]) >= self._effective_buffer_size` を返す。MTF なら全 TF が条件満たすまで False。(2) StrategyWorker._process_bar 冒頭で `not feature_store.is_warmed_up()` なら generate_signal をスキップし `bars_warming` カウンタを加算する。(3) stream_receiver の初回 warmup を `max(sum_of_loaded_strategy_required_periods × BUFFER_SAFETY_FACTOR, 300)` 相当に連動させ、LoadedStrategy から max_period を露出させる。(4) Health check に warmup 進捗を公開し、Dashboard / Prometheus で可視化。"
+    },
+    {
+      "id": "DE-003",
+      "severity": "high",
+      "area": "bar_boundary",
+      "title": "BarBuilder の D 足境界が UTC 00:00 固定で、ATLAS BT が使う OANDA D 足（NY 17:00 アライン）と 1 日ズレる",
+      "description": "BarBuilder._get_bar_start (bar_builder.py:342-348) は `ts - (ts % period_seconds)` で UTC エポック起点に強制アラインする。D 足（period_seconds=86400）の場合、UTC 00:00:00 で日次バーが切られる。しかし OANDA candles API の D 足はデフォルトで `dailyAlignment=17, alignmentTimezone=America/New_York` を返す（= NY 17:00 = UTC 21:00 または 22:00 DST 依存）。ATLAS BT (data_loader.py:163-208) は `alignmentTimezone` を指定せず受け取った candle.time をそのまま `timestamp` に格納するため、BT は NY 5PM アライン・Live tick_aggregation モードの BarBuilder は UTC アライン となり、truth_source='tick_aggregation' 経路で D 戦略を動かすと同じ「2026-04-18 の日次バー」でも OHLC が別バーを指す。truth_source='oanda_candle' (CandleFetcher 経由) に切替えれば ATLAS と同一の OANDA 時刻が返るため整合するが、デフォルトは tick_aggregation (bar_builder.py:80) で整合が崩れる。H1/H4 でも類似の問題が起きうる（OANDA H4 も NY 17:00 起点で 04:00/08:00/12:00/16:00/20:00/00:00 NY、すなわち UTC 21:00/01:00/05:00/09:00/13:00/17:00 DST 変動）— BarBuilder の UTC 00/04/08/12/16/20 アラインとは常にズレる。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/market_data/bar_builder.py:342-348",
+        "fx_trading_system/trading_platform/data/market_data/bar_builder.py:80-91",
+        "fx_trading_system/trading_platform/broker/oanda_adapter/client.py:561-595",
+        "ATLAS/atlas/backtest/data_loader.py:163-208"
+      ],
+      "suggested_fix": "(1) Live 運用の D/H4 戦略は必ず truth_source='oanda_candle' (CandleFetcher) を使うよう `MarketDataPipeline` で enforce する（tick_aggregation モードを D/H4 で選ぶと ValueError）。(2) OANDA candles API リクエストに `alignmentTimezone=UTC&dailyAlignment=0` を明示指定し、ATLAS / FTS 双方を UTC 00:00 アラインに統一する。この場合 ATLAS 側 data_loader も同じパラメータを送る必要あり — shared contract 更新必須。(3) BarBuilder._get_bar_start に timeframe-aware alignment を実装し、broker の D 足境界時刻（config 注入）に合わせる。"
+    },
+    {
+      "id": "DE-004",
+      "severity": "high",
+      "area": "market_data",
+      "title": "Tick 集約バー (tick_aggregation) と OANDA 公式 candle でボリューム・H/L が乖離するが、truth_source がデフォルトで tick_aggregation",
+      "description": "BarBuilder は tick を mid price で集約して OHLCV を作るが、(a) volume は tick count ベース (bar_builder.py:425 `self._volume += 1.0`) で OANDA candle.volume（実約定本数）と全く別物、(b) high/low は mid で記録されるが OANDA candle の H/L は bid/ask 実勢レンジで測られている（tick mid は bid/ask の中央 → spread 分狭くなる）。Donchian/Bollinger/ATR が ATLAS BT と異なる値を出す。candle_fetcher.py 冒頭コメント (line 10-13) でこの問題を明示している。にもかかわらず BarBuilder のデフォルトは tick_aggregation (bar_builder.py:80) で、MarketDataPipeline が明示的に truth_source='oanda_candle' を指定しなければ乖離するバーが LiveFeatureStore に流れ込み戦略判定が BT と乖離する。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/market_data/bar_builder.py:80",
+        "fx_trading_system/trading_platform/data/market_data/bar_builder.py:420-426",
+        "fx_trading_system/trading_platform/data/market_data/candle_fetcher.py:10-13"
+      ],
+      "suggested_fix": "(1) BarBuilder の truth_source デフォルトを 'oanda_candle' に変更する。Tick 集約が必要なのは intra-bar UI 表示用途のみで、generate_signal ルートでは常に公式 candle を Truth にする。(2) 起動設定で truth_source='tick_aggregation' が選ばれた場合、Kill Switch 手前で警告を出し、ライブ口座への発注を禁止する（paper/research のみ許可）。"
+    },
+    {
+      "id": "DE-005",
+      "severity": "high",
+      "area": "feature_store",
+      "title": "LiveFeatureStore の TF_SECONDS 辞書と timeframes.TIMEFRAME_SECONDS / stream_receiver._TF_SECONDS が別定義で、D/D1 キーに差異あり",
+      "description": "FTS 内に `時間足 → 秒数` マップが 3 箇所重複定義されている: (a) live_store.py:66-74 は key=D1 のみ (D key 無し)、(b) stream_receiver.py:52-55 は key=D のみ (D1 key 無し)、(c) data/common/timeframes.py:23-32 は D / D1 両方。LiveFeatureStore._align_aux_to_primary (line 550) が `TF_SECONDS.get(aux_tf)` で lookup するが、aux_tf='D' と _normalize_tf で 'D1' に揃えられる (line 83-84)。一方 stream_receiver._run_initial_backfill (line 425) は `_TF_SECONDS.get(tf)` で元の tf 文字列をそのまま lookup する — backfill_timeframes リストに 'D1' を渡すと None が返り warmup スキップされ、'D' を渡すと OANDA 側へ D granularity で問い合わせる。BarEvent.timeframe は Timeframe Enum (str Enum) で D1 を指すため tf.value='D1'。これを backfill_timeframes に渡すと初回 warmup が全スキップされる。(同 timeframe ==> 異なる挙動) がテストで捕まらない構造。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/feature_store/live_store.py:66-74",
+        "fx_trading_system/trading_platform/data/market_data/stream_receiver.py:52-55",
+        "fx_trading_system/trading_platform/data/common/timeframes.py:23-32",
+        "fx_trading_system/trading_platform/data/feature_store/live_store.py:80-85"
+      ],
+      "suggested_fix": "全箇所を `trading_platform.data.common.timeframes.TIMEFRAME_SECONDS` (D/D1 両対応版) に統一する。live_store.py 内の TF_SECONDS と stream_receiver.py の _TF_SECONDS をローカル再定義禁止にし、timeframes モジュールから import 一択にする。normalize_tf も同モジュールへ移動。tests/unit/test_timeframe_consistency.py を追加し、3 箇所の辞書が同一キー集合を持つことを assert。"
+    },
+    {
+      "id": "DE-006",
+      "severity": "high",
+      "area": "data_quality",
+      "title": "DataQualityConfig の spread_check_mode デフォルトが disabled で、Tick/Bar 品質ゲートに異常価格検知の穴",
+      "description": "quality_engine.py:118-121 で `spread_check_mode='disabled'` がデフォルト設定。これは SHARED_CONTRACT §12.4 の 2 段階ロールアウト方針で一時的に選ばれたが、本番運用移行後も明示切替が無ければ bar レベルの異常 H-L 検知が完全に無効化される。Live 運用中に OANDA が flash crash や API バグで H=100.00 / L=0.01 のような異常 bar を返してきた場合、ATR が scoped で爆発的に跳ね、SL pips の桁があふれて margin check 通過 → 巨大ポジションに発展する経路が残る。加えて spread check disabled 時も `max_spread_multiplier=3.0` default は存続しているが参照先が無く、設定矛盾の危険シグナル。Tick 側の max_tick_jump_pct=1.0 はあるが bar 側はない。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/quality/quality_engine.py:118-141",
+        "fx_trading_system/docs/SHARED_CONTRACT.md:334-339"
+      ],
+      "suggested_fix": "(1) production 環境では spread_check_mode='pip_based' を enforce する設定バリデータを config/environments/production.py に追加。(2) bar レベルでも max_price_jump_pct を適用し、bar_close 間のジャンプ率で異常検知する CheckType.BAR_JUMP を追加。(3) spread_check_mode='disabled' 起動時に起動ログ warning を出し、Prometheus metrics で永続化。"
+    },
+    {
+      "id": "DE-007",
+      "severity": "high",
+      "area": "state_store",
+      "title": "StateStore に Redis 接続切断からの自動回復機能・TTL・health check が一切無い",
+      "description": "redis_store.py 全体を grep しても `TTL / expire / reconnect / retry / connection_pool` が 0 件ヒット。StateStoreBackend プロトコル (redis_store.py:27-35) は単純 get/set/hset/hget のみで、Redis 側が切断したら `await self._backend.get(...)` がそのまま例外を raise し、呼び出し元（FillProcessor / RiskEngine）が catch していない経路では未処理例外でイベントループが停止する。CLAUDE.md で PostgreSQL + TimescaleDB が primary DB として列挙 (CLAUDE.md:28) されているが、postgres_store.py は実装されていない (glob 確認、ディレクトリに存在せず)。永続化は Redis 単独で、Redis ダウン = ポジション / kill_switch 状態 / last_bar_time 全消失というシングルポイント障害。再起動後の `save_last_bar_time` による backfill 再開も Redis が生きている前提で動く。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/state_store/redis_store.py:1-199",
+        "fx_trading_system/CLAUDE.md:28-31",
+        "fx_trading_system/trading_platform/data/market_data/candle_fetcher.py:258-269"
+      ],
+      "suggested_fix": "(1) StateStoreBackend 実装に retry (tenacity) と exponential backoff を追加、最大 N 回失敗で kill_switch を発動する。(2) main.py 起動時に Redis ping health check を実施し NG なら起動拒否。(3) postgres_store.py を実装し、Redis は cache、Postgres を truth とする WAL パターンに変更（CLAUDE.md 記述通り）。(4) kill_switch などの critical state は Redis と Postgres の両方に二重書きし、どちらか生存していれば読めるようにする。"
+    },
+    {
+      "id": "DE-008",
+      "severity": "high",
+      "area": "feature_store",
+      "title": "MAX_BUFFER_SIZE=20000 張り付き時の EWM ドリフト検知が warn ログのみで、PTRC 連携なし",
+      "description": "LiveFeatureStore._warn_trim_once (live_store.py:408-431) は `_trim_warned` フラグで初回一度だけ warning を出すが、それ以降はカウンタ増加もメトリクス記録もない。コメント (line 427-430) 自身が 'MAX_BUFFER_SIZE を超えると ATLAS BT との Parity ドリフトが発生する可能性' と明記しているにもかかわらず、発動時に (a) Kill Switch 経路に通知しない、(b) Prometheus カウンタが無い、(c) Dashboard に露出しない。period=400 を指定する戦略（MACD slow=200 など）は 400×50=20000 で張り付き、Parity が 1e-10 を超過しても generate_signal は通常通り発火して発注まで到達する。audit round_9 validation でも類似懸念が指摘済み。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/feature_store/live_store.py:38-52",
+        "fx_trading_system/trading_platform/data/feature_store/live_store.py:408-431",
+        "fx_trading_system/logs/audit/round_9/validation.json:94"
+      ],
+      "suggested_fix": "(1) _effective_buffer_size が MAX_BUFFER_SIZE に到達したら起動時に ValueError を raise して戦略ロードを拒否する（戦略の period 指定が過大と判定）。(2) 実運用中にトリミングが発生した場合は metrics.inc_feature_store_buffer_trim(strategy_id, tf) をインクリメントし、SLO 違反閾値を設定する。(3) Parity drift 観測のため、定期的に直近 N 本の Live 値と BT 値をオフラインで突合するバッチ diff 監視を実装する。"
+    }
+  ]
+}

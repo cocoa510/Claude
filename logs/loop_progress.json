@@ -1,0 +1,10 @@
+{
+  "session_id": "ATLAS-LOOP-2026-0418-002",
+  "current_gen": "ATLAS-2026-0418-002",
+  "current_generation_num": 1,
+  "max_generations": 10,
+  "step": "backtest",
+  "status": "running",
+  "timestamp": "2026-04-18T12:07:30Z",
+  "elapsed_minutes": 7
+}

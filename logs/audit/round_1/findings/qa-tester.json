@@ -1,0 +1,89 @@
+{
+  "agent": "qa-tester",
+  "findings": [
+    {
+      "id": "QT-001",
+      "severity": "high",
+      "area": "fault/test_oanda_api_fault.py",
+      "title": "test_partial_failure_probability はスモークアサーションのみで確率的挙動を検証していない",
+      "description": "test_partial_failure_probability は docstring で「10回中少なくとも1回成功・1回失敗することを確認する」と宣言しているが、実際のアサートは `assert len(results) == 10` のみ。successes / failures の値が計算されるが何もアサートされていない。fail_probability=0.5 の実効性が検証されておらず、FaultOANDAClient 内部で確率制御が壊れても通過するシレント偽緑テスト。",
+      "evidence": [
+        "tests/fault/test_oanda_api_fault.py:149-170"
+      ],
+      "suggested_fix": "assert 1 <= successes <= 9 のような範囲アサートを追加する。seed=42 固定の場合は決定論的なので successes の正確な値をアサートしてもよい。"
+    },
+    {
+      "id": "QT-002",
+      "severity": "high",
+      "area": "tests/unit/",
+      "title": "PTRC _check_max_daily_loss と _check_per_pair_exposure の単体テストが存在しない",
+      "description": "PTRC には _check_fat_finger / _check_max_risk_per_trade / _check_total_exposure / _check_max_daily_loss / _check_per_pair_exposure / _check_circuit_breaker_kill_switch / _check_margin の7チェックがある。_check_max_daily_loss を直接呼ぶテストが存在しない（daily_loss テストは KillSwitch の発動テストのみ。PTRC レイヤーではない）。_check_per_pair_exposure のテストは完全に存在しない。これらの拒否条件が実装バグを持っていても、統合テストで偶発的にカバーされない限り検出されない。",
+      "evidence": [
+        "trading_platform/core/risk_engine/ptrc.py:277-389",
+        "tests/unit/test_ptrc_currency_conversion.py (MAX_DAILY_LOSS / PER_PAIR_EXPOSURE のテストなし)",
+        "tests/unit/test_ptrc_margin_leverage.py (同上)",
+        "tests/unit/test_r6_risk_fixes.py:44-78 (total_exposure のみカバー)"
+      ],
+      "suggested_fix": "tests/unit/test_ptrc.py を新規作成し _check_max_daily_loss（daily_realized_pnl が閾値超過で approved=False）と _check_per_pair_exposure（単一ペア集中リスク）の単体テストを追加する。"
+    },
+    {
+      "id": "QT-003",
+      "severity": "high",
+      "area": "tests/integration/test_signal_flow.py",
+      "title": "E2Eフローテストのアサートが「完走のみ」でシグナル生成を保証していない",
+      "description": "test_full_signal_to_fill_flow は200本のバーを流してシグナルが出なかった場合もアサートが assert feature_store.bar_count == 200 のみで通過する。テスト実行環境によっては sample_ohlcv_df（合成乱数データ）から戦略がシグナルを一度も出さない場合がある。その場合 fills_completed=0 のまま `if fills_completed > 0` ブランチが一切実行されず、PTRC→Order→Fill の経路が全く検証されないが CI は緑になる。",
+      "evidence": [
+        "tests/integration/test_signal_flow.py:272-276"
+      ],
+      "suggested_fix": "200本で無シグナルの場合は pytest.fail() で強制失敗させるか、シグナルが確実に出る合成データ（EMA クロス条件を人工的に満たすデータ）をフィクスチャに使う。あるいは _ForceLongStrategy のようなスタブ戦略でフロー全体を保証するテストを独立させる。"
+    },
+    {
+      "id": "QT-004",
+      "severity": "high",
+      "area": "tests/",
+      "title": "OANDA HTTP 429 (Rate Limit) に対する障害注入テストが存在しない",
+      "description": "fault/test_oanda_api_fault.py は IOError / ClientConnectionError / TimeoutError / 5xx / 4xx をカバーしているが、HTTP 429 Too Many Requests（OANDA レートリミット）に対するテストが存在しない。429 は Retry-After ヘッダを伴うため通常の 4xx/5xx とは異なるバックオフ戦略が必要。OANDABroker/BrokerGateway がこれを正しくハンドルするか（または単に failure として処理するか）が未検証。",
+      "evidence": [
+        "tests/fault/test_oanda_api_fault.py (429 のテストケースなし)",
+        "trading_platform/broker/oanda_adapter/client.py (429ハンドリングの存在確認不可)"
+      ],
+      "suggested_fix": "aiohttp.ClientResponseError(status=429) を注入するテストケースを test_oanda_api_fault.py に追加し、BrokerGateway が RETRYABLE として分類し適切に扱うことを検証する。"
+    },
+    {
+      "id": "QT-005",
+      "severity": "high",
+      "area": "tests/",
+      "title": "Event Bus フルキュー / バックプレッシャー時のイベントサイレントドロップを検証するテストが存在しない",
+      "description": "InMemoryEventBus および RedisEventBus がキュー満杯になった場合にイベントをサイレントにドロップするかどうかを検証するテストが存在しない。test_r6_risk_fixes.py で correlation_id 直列化の並行性は検証されているが、キュー容量オーバー時の挙動（例外 or ドロップ or ブロック）は未テスト。本番でシグナルが大量発生した場合に注文が無音で失われるリスクがある。",
+      "evidence": [
+        "tests/ 全体に queue full / backpressure / maxsize / overflow のテストコードなし",
+        "trading_platform/core/event_bus/memory_adapter.py (キューサイズ制限の有無未確認)"
+      ],
+      "suggested_fix": "InMemoryEventBus に対して、大量イベントを同期的にパブリッシュした場合に (a) 例外が発生するか (b) イベントがドロップされないかを検証するテストを追加する。ドロップが発生する場合はエラーログが出ることをアサートする。"
+    },
+    {
+      "id": "QT-006",
+      "severity": "high",
+      "area": "tests/",
+      "title": "再起動後の注文照合（Order Reconciliation after restart）のテストが存在しない",
+      "description": "test_reconnect_cycle.py は接続断→再接続の reconcile をテストしているが、「プロセス再起動後に StateStore から状態を復元し、途中状態の注文（SUBMITTED のまま残った注文）を OANDA 側と照合する」シナリオのテストが存在しない。これは docs/SHARED_CONTRACT.md に記載された重要フローだが、fault/ にも integration/ にも対応テストがない。プロセスクラッシュ後に SUBMITTED 注文がゾンビ化するリスクが未検証。",
+      "evidence": [
+        "tests/fault/test_reconnect_cycle.py (プロセス再起動シミュレーションなし)",
+        "trading_platform/CLAUDE.md:130-132 (Order Reconciliation を定期実行し不整合を検知と記載)"
+      ],
+      "suggested_fix": "StateStore にポジション・注文状態を保存したあとプロセス再起動を模倣（新しい FillProcessor + StateStore インスタンス作成）し、SUBMITTED 状態の注文が reconciler によって検出されることを検証するテストを追加する。"
+    },
+    {
+      "id": "QT-007",
+      "severity": "high",
+      "area": "tests/conftest.py",
+      "title": "sample_ohlcv_df フィクスチャが合成乱数データのみで実際のOANDA価格形式を再現していない",
+      "description": "tests/conftest.py の sample_ohlcv_df はランダムウォークで生成した合成USD_JPYデータ（200本）。realistic_ohlcv (parity/conftest 相当) も同様の合成データ。これらはスプレッド・ギャップ・週末クローズ・整数pip単位といったOANDA実データ固有の特性を持たない。特にボリンジャーバンドのスクイーズ局面・ATR急拡大・フラット相場などの境界条件が網羅されない。これにより指標計算の端境ケース（ゼロ除算等）が本番まで発見されないリスクがある。",
+      "evidence": [
+        "tests/conftest.py:173-197",
+        "tests/parity/test_feature_store_parity.py:23-42"
+      ],
+      "suggested_fix": "OANDA Candles API から取得したサンプルデータ（または tests/fixtures/ohlcv/ にコミットした実データスナップショット）を追加フィクスチャとして提供し、parity テストの一部で実データを使用する。"
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+{
+  "agent": "platform-architect",
+  "findings": [
+    {
+      "id": "PA-001",
+      "severity": "high",
+      "area": "event_bus",
+      "title": "RiskAlertEvent never propagates correlation_id — causal chain breaks at every alert",
+      "description": "All RiskAlertEvent publish sites (circuit_breaker line 125 and 387, position_reconciler lines 242/252/265, health_check line 375) omit correlation_id entirely. BaseEvent.correlation_id defaults to None. This means any operator who tries to join an alert (e.g. 'position_discrepancy' or 'kill_switch_activated') back to the originating signal/order/fill cannot do so — the audit trail breaks at the exact moment it matters most. The in-memory/Redis bus added correlation_id serialization locks (FTS-PA-11 / R5-002), but those locks are no-ops for RiskAlert traffic because the cid is always None. Contrast with coordinator.py where every OrderEvent/FillEvent correctly carries order.correlation_id (lines 244, 267, 282, 310, 324, 427). Note DataQualityEngine DOES propagate it (quality_engine.py:464 `correlation_id=bar.correlation_id`), showing the pattern is known but not applied uniformly.",
+      "evidence": [
+        "trading_platform/core/risk_engine/circuit_breaker.py:125",
+        "trading_platform/core/risk_engine/circuit_breaker.py:387",
+        "trading_platform/core/execution_engine/position_reconciler.py:242",
+        "trading_platform/core/execution_engine/position_reconciler.py:252",
+        "trading_platform/core/execution_engine/position_reconciler.py:265",
+        "trading_platform/core/monitoring/health_check.py:375",
+        "trading_platform/core/models/events.py:91"
+      ],
+      "suggested_fix": "Circuit Breaker / PositionReconciler — when the alert originates from a specific order/fill/position pass that object's correlation_id into RiskAlertEvent(...). For bulk discrepancy alerts attach the list of affected correlation_ids into `details`. KillSwitch._activate needs either the triggering order's correlation_id or a freshly generated kill-switch session id so downstream consumers can fan out. HealthChecker outage alerts should set correlation_id=f'oanda-outage-{start_ts.isoformat()}' so paired recovery alerts can be matched."
+    },
+    {
+      "id": "PA-002",
+      "severity": "high",
+      "area": "config",
+      "title": "OANDA API key stored as plain str (not SecretStr) — leaks on any settings dump/repr",
+      "description": "PlatformSettings.oanda_api_key is typed `str` at settings.py:37, not `pydantic.SecretStr`. Any accidental `settings.model_dump()`, `repr(settings)`, exception traceback showing locals, or dashboard debug endpoint dumping the settings object will expose the live OANDA token in logs. Grep confirms zero `SecretStr` usage anywhere in trading_platform. The same applies to any future password fields. CLAUDE.md explicitly mandates `.env` hygiene but the in-memory model has no defence-in-depth against logging leaks. Aggravating factor: main.py:65-68 initialises structlog with log_to_file=True capability, and get_status() exposes a large object graph — a future maintainer adding settings visibility risks writing the key to disk.",
+      "evidence": [
+        "trading_platform/config/settings.py:37",
+        "trading_platform/main.py:187",
+        "trading_platform/main.py:446"
+      ],
+      "suggested_fix": "Change to `oanda_api_key: SecretStr = Field(default=SecretStr(''))` and unwrap via `.get_secret_value()` at the two usage sites (main.py:187, 374, 446; broker/oanda_adapter/client.py:102; stream_receiver.py:67). SecretStr's repr returns '**********' which blocks every accidental log path. Add the same for oanda_account_id if treated as sensitive. Add a pytest guard: `assert 'api_key' not in str(PlatformSettings())`."
+    },
+    {
+      "id": "PA-003",
+      "severity": "high",
+      "area": "application_startup",
+      "title": "SnapshotWriter never wired in main.py — Trade Context Snapshot fail-closed is dead code",
+      "description": "coordinator.py:287-312 implements a fail-closed check: if SnapshotWriter.write_or_raise() throws, the order is REJECTED before broker submission (FTS-RX-014 — comment 'fail-closed を採用し、監査証跡なしで発注が走ることを構造的に防止する'). But main.py never instantiates SnapshotWriter and never passes it to ExecutionCoordinator (line 330-342). Because the constructor signature defaults to `snapshot_writer: SnapshotWriter | None = None`, the entire snapshot-persistence gate at coordinator.py:287 is silently skipped in production. CLAUDE.md line 132 requires 'すべての注文判断時に Trade Context Snapshot を保存する' — this requirement is structurally unsatisfied in the running binary. Audit regulators inspecting snapshot logs will find an empty directory despite PASS status in code.",
+      "evidence": [
+        "trading_platform/main.py:330",
+        "trading_platform/core/execution_engine/coordinator.py:61",
+        "trading_platform/core/execution_engine/coordinator.py:287",
+        "trading_platform/data/trade_context/__init__.py:2"
+      ],
+      "suggested_fix": "In TradingPlatform.__init__ (main.py around line 82) construct `self._snapshot_writer = SnapshotWriter(log_dir=self._settings.log_dir / 'context_snapshots')` and pass it into ExecutionCoordinator at line 330. Also add a startup assertion in production mode: `if self._settings.env == PRODUCTION and self._snapshot_writer is None: raise RuntimeError(...)`. Optionally expose a Prometheus counter `snapshot_written_total` already used in coordinator to alert on zero writes."
+    },
+    {
+      "id": "PA-004",
+      "severity": "high",
+      "area": "pydantic_models",
+      "title": "Event payloads lack extra='forbid' — drift between ATLAS TradeSignal and FTS events silently accepted",
+      "description": "BaseEvent, TickEvent, BarEvent, SignalEvent, OrderEvent, FillEvent, RiskAlertEvent, HeartbeatEvent all inherit Pydantic default behaviour (`extra='ignore'`). Redis deserialization at redis_adapter.py:374 (`event_cls.model_validate_json(raw_data)`) will silently drop unknown fields — meaning if a producer in a future version adds a critical field (e.g. `urgency` on RiskAlertEvent) and a consumer lags behind, the field disappears without a validation error. OandaCandle and TradeContextSnapshot do set `extra='ignore'` explicitly (payloads.py:55, 209), but for cross-process event traffic 'forbid' is the safer default. Additionally, SignalEvent.signal holds an ATLAS TradeSignal (events.py:180) which itself has no `extra='forbid'` in atlas/common/models.py:62 — if the ATLAS team adds a new TradeSignal field FTS will drop it on deserialization from Redis PubSub. This creates a cross-repo version drift that is impossible to detect at runtime.",
+      "evidence": [
+        "trading_platform/core/models/events.py:79",
+        "trading_platform/core/models/events.py:175",
+        "trading_platform/core/models/events.py:261",
+        "trading_platform/core/event_bus/redis_adapter.py:374",
+        "ATLAS/atlas/common/models.py:62"
+      ],
+      "suggested_fix": "Add `model_config = ConfigDict(extra='forbid')` to BaseEvent (propagates to all subclasses). Run the full test suite to catch producer sites that were silently passing kwargs like `reason=...` where they shouldn't. For the ATLAS TradeSignal coupling: pin the atlas package to a specific commit in pyproject.toml and add a contract test `test_signal_event_roundtrip.py` that serializes SignalEvent via Redis adapter and fails on any drift."
+    },
+    {
+      "id": "PA-005",
+      "severity": "high",
+      "area": "event_bus",
+      "title": "InMemoryEventBus publish() silently drops events when _running=False",
+      "description": "memory_adapter.py:84-86 — if publish() is called before start() or after stop(), it logs a warning and returns without invoking handlers. This creates a subtle shutdown-race window: stop() sets _running=False at line 58 before draining pending handler tasks. Any coordinator or risk component that publishes a terminal OrderEvent/FillEvent during its own shutdown (e.g. _run_stage emits 'coordinator stop' which might trigger one last fill event) will be swallowed. The RedisEventBus does NOT have this asymmetry (redis_adapter.py:169 has no _running guard on publish, only fallback paths). The asymmetry means tests pass on memory bus but production Redis path has different visibility. Further: a publish-before-start bug (e.g. emitting init-time events) will be hidden from developers.",
+      "evidence": [
+        "trading_platform/core/event_bus/memory_adapter.py:84",
+        "trading_platform/core/event_bus/memory_adapter.py:58",
+        "trading_platform/core/event_bus/redis_adapter.py:169"
+      ],
+      "suggested_fix": "Either (a) in stop(), flip _running=False only AFTER the drain completes, or (b) in publish(), allow execution when _running is False but a drain is in progress, or (c) raise an explicit EventBusNotRunningError instead of silently returning. Option (c) is safest — crashing loud is better than losing a FillEvent at shutdown. Mirror the guard to RedisEventBus for symmetry."
+    }
+  ]
+}

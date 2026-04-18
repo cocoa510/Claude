@@ -1,0 +1,218 @@
+[
+  {
+    "issue_id": "QT-R2-002",
+    "area": "analyzer/metrics/fill_rate_denominator",
+    "root_cause": "result_parser.py:49-53 が分母に len(l2.equity_curve) を使うが、event_simulator.py:1383-1385 で equity_curve は最大500点に間引かれる。真の分母はBT総バー数 (BacktestResult.data_bars、99530件等) であるべき。結果 fill_rate が実際より約200倍過大算出され、weakness_detector.py:344 の 0.05 閾値で常時「過剰トレード」判定 → fx-strategist に偽の『エントリーフィルター追加』指示 → Gen42-55 の53世代全敗の一因。",
+    "commit_type": "[change:spec]",
+    "rationale_for_change_spec": "fill_rate の数値出力が200倍変化するため、METRICS_SCHEMA_VERSION インクリメントが必要。ただしGate条件にfill_rateは含まれないため、Gate判定結果は不変。既存戦略のresult.jsonに記録済みのfill_rateは旧定義のまま残り、比較時はmetrics_schema_versionで差異を明示。",
+    "fix_summary": "result_parser.py:49-53 を `total_bars = result.data_bars if result.data_bars else len(l2.equity_curve); fill_rate = round(l2.total_trades / total_bars, 6) if total_bars else None` に修正。桁数は6桁に拡張（0.008レベルの小数を扱うため）。",
+    "files_to_change": [
+      {"path": "ATLAS/atlas/backtest/result_parser.py", "lines": "49-53", "change": "分母をresult.data_barsに変更、round(..., 6)に拡張"},
+      {"path": "ATLAS/atlas/analyzer/weakness_detector.py", "lines": "344", "change": "閾値0.05 → 0.001 (per-barレート基準で再キャリブレーション)"},
+      {"path": "ATLAS/atlas/config/defaults.py", "lines": "17", "change": "METRICS_SCHEMA_VERSION 4.6.0 → 4.7.0"},
+      {"path": "ATLAS/docs/spec_change_log.md", "change": "fill_rate 定義明確化と閾値再キャリブレーションの記録"}
+    ],
+    "regression_prevention": {
+      "tests": [
+        "tests/unit/test_fill_rate_denominator.py 新設: data_bars=99530, equity_curve=501, total_trades=808 の合成データで fill_rate=0.0081±0.0001 を検証",
+        "tests/unit/test_weakness_detector_fill_rate.py: 新閾値0.001でGen003類似ケースが発火しないことを検証",
+        "tests/golden/ には fill_rate 期待値を含まないため、既存golden破壊なし"
+      ],
+      "logs": [
+        "result_parser 内で fill_rate 算出時に data_bars/equity_curve サイズの両方を DEBUG ログ出力"
+      ]
+    },
+    "side_effects": [
+      "既存戦略(Gen001〜018)のresult.jsonのfill_rateは旧定義(200倍過大)のまま残る",
+      "新規BT以降はmetrics_schema_version=4.7.0で記録、比較時に差異を警告",
+      "weakness_detector が『過剰トレード』を指摘する頻度は激減(おそらく0件近く)",
+      "fx-strategistへの改善指示の質が回復"
+    ],
+    "dependencies": [],
+    "estimated_loc": 15,
+    "risk_level": "low"
+  },
+  {
+    "issue_id": "QT-008",
+    "file": "tests/unit/test_coordinator_snapshot.py",
+    "line": 112,
+    "current_code": "assert call_args.args[0].startswith(\"O-\") or call_args.args[0]  # order_id is present",
+    "problem": "右辺 `or call_args.args[0]` が truthy な値に対して常に True となり、startswith('O-') 検証が機能しない偽緑アサート",
+    "fix": {
+      "type": "single_line_replace",
+      "new_code": "assert call_args.args[0].startswith(\"O-\"), f\"order_id が O- プレフィックスを持たない: {call_args.args[0]!r}\"",
+      "rationale": "startswith('O-') の単独アサートのみに絞ることで、意図した契約（order_id フォーマット）を正確に検証する"
+    },
+    "additional_false_greens_found": [
+      {
+        "file": "tests/fault/test_reconnect_cycle.py",
+        "line": 245,
+        "current_code": "assert result.get(\"status\") in (\"ok\", \"matched\", None) or \"error\" not in result",
+        "problem": "右辺 `\"error\" not in result` は result に 'error' キーが存在しなければ常に True。status 検証が実質無効化される偽緑",
+        "recommended_fix": "assert result.get(\"status\") in (\"ok\", \"matched\"), f\"予期しない status: {result.get('status')!r}\""
+      }
+    ],
+    "recurrence_prevention": {
+      "ci_proposal": "flake8-bugbear の B017/B018 に加えて、カスタム pylint チェッカー（`assert A or B` パターンを警告）を CI に追加する。具体的には `scripts/lint_false_green.py` を作成し、ast モジュールで BoolOp(Or) を含む Assert ノードを検出して非ゼロ終了させる。pytest-deadfixtures は未使用フィクスチャ検出に有用だが、偽緑アサート検出には対応しておらず本件には不適。"
+    }
+  },
+  {
+    "issue_id": "DE-004",
+    "file": "fx_trading_system/trading_platform/config/settings.py",
+    "summary": "truth_source のデフォルトが 'tick_aggregation' となっており、env=production で明示指定を忘れると BT (ATLAS: OANDA candles) と異なる Tick 集約 OHLC で発注される。BT/Live Parity Contract (docs/SHARED_CONTRACT.md) 違反。",
+    "commit_type": "[fix:bug]",
+    "root_cause": {
+      "declaration": "settings.py:112-119 `truth_source: str = Field(default='tick_aggregation', ...)`",
+      "usage_main": "main.py:280 で `BarBuilder(..., truth_source=self._settings.truth_source)`、main.py:287 で `if self._settings.truth_source == 'oanda_candle' and self._oanda_broker is not None:` によってのみ CandleFetcher が起動する",
+      "usage_bar_builder": "bar_builder.py:195 `is_complete = self._truth_source == 'tick_aggregation'` — tick_aggregation 時のみ確定バーを is_complete=True で emit。oanda_candle 時は CandleFetcher が is_complete=True を emit する",
+      "impact": "env=production でオペレータが .env の TRUTH_SOURCE=oanda_candle を忘れた場合、CandleFetcher は起動せず BarBuilder の Tick 集約バーが確定バーとして strategy.generate_signal() に流れ、ATLAS BT の OANDA candle ベースと high/low/close/volume が乖離（既存 test_oanda_candle_truth.py で乖離を実証済み）"
+    },
+    "fix": {
+      "type": "model_validator_enforce",
+      "target_file": "fx_trading_system/trading_platform/config/settings.py",
+      "pattern_reference": "PA-003 の `_enforce_production_snapshot_required` (settings.py:242-256) を踏襲",
+      "changes": [
+        {
+          "location": "settings.py の `_enforce_production_snapshot_required` 直後に新規追加",
+          "new_code": "    @model_validator(mode=\"after\")\n    def _enforce_production_truth_source(self) -> PlatformSettings:\n        \"\"\"DE-004: production 環境では truth_source='tick_aggregation' を禁止する。\n\n        ATLAS バックテストは OANDA candles API を Truth ソースとするため、\n        Live が Tick 集約バーを使うと high/low/close/volume が乖離し、\n        BT/Live Parity Contract (docs/SHARED_CONTRACT.md) に違反する。\n        PA-003 と同様、env は Environment 列挙型なので `self.env == Environment.PRODUCTION`\n        で厳密比較し、fail-closed 経路が dead code 化するのを構造的に防ぐ。\n        \"\"\"\n        if self.env == Environment.PRODUCTION and self.truth_source != \"oanda_candle\":\n            msg = (\n                \"DE-004: production 環境では truth_source='oanda_candle' を必須とする\"\n                f\"（現在の設定: {self.truth_source!r}）。\"\n                \" ATLAS BT は OANDA candles API を Truth とするため、\"\n                \" Tick 集約バーを使うと BT/Live Parity Contract (docs/SHARED_CONTRACT.md)\"\n                \" に違反する。環境変数 TRUTH_SOURCE=oanda_candle を設定すること。\"\n            )\n            raise ValueError(msg)\n        return self"
+        }
+      ],
+      "default_policy": "truth_source の Field default は 'tick_aggregation' のまま維持する（research/staging の後方互換および既存テスト test_oanda_candle_truth.py / test_worker_coordinator.py:188 を壊さないため）。production でのみ model_validator で強制する方式が PA-003 と整合する"
+    },
+    "startup_logging": {
+      "target_file": "fx_trading_system/trading_platform/main.py",
+      "location": "main.py:280 の BarBuilder 初期化直前（_settings 参照箇所の前）",
+      "new_code": "            # DE-004: Truth ソース選択を CRITICAL で明示出力する（audit 要件）。\n            logger.critical(\n                \"truth_source 選択\",\n                env=self._settings.env.value,\n                truth_source=self._settings.truth_source,\n                bt_parity_expected=(self._settings.truth_source == \"oanda_candle\"),\n                contract_ref=\"docs/SHARED_CONTRACT.md\",\n            )",
+      "rationale": "structlog の critical 出力はログ収集基盤 (Loki/Prometheus) でアラート化でき、人間の事後監査にも確実に残る"
+    },
+    "recurrence_prevention": {
+      "integration_test": {
+        "file": "fx_trading_system/tests/integration/test_production_truth_source_enforcement.py",
+        "new_file": true,
+        "test_cases": [
+          {
+            "name": "test_production_requires_oanda_candle",
+            "assertion": "PlatformSettings(env=Environment.PRODUCTION, truth_source='tick_aggregation') が ValidationError を送出し、メッセージに 'DE-004' と 'oanda_candle' を含むこと"
+          },
+          {
+            "name": "test_production_with_oanda_candle_ok",
+            "assertion": "PlatformSettings(env=Environment.PRODUCTION, truth_source='oanda_candle') が正常に構築できること"
+          },
+          {
+            "name": "test_research_allows_tick_aggregation",
+            "assertion": "PlatformSettings(env=Environment.RESEARCH, truth_source='tick_aggregation') が正常に構築できること（既存 research 挙動維持）"
+          },
+          {
+            "name": "test_staging_allows_tick_aggregation",
+            "assertion": "PlatformSettings(env=Environment.STAGING, truth_source='tick_aggregation') が正常に構築できること（staging は現行維持方針）"
+          },
+          {
+            "name": "test_main_startup_logs_truth_source_critical",
+            "assertion": "structlog capture fixture で main 起動時に level=CRITICAL かつ event='truth_source 選択' のログが 1 件以上出力されること"
+          }
+        ]
+      },
+      "ci_check": "CI で `pytest tests/integration/test_production_truth_source_enforcement.py` を必須化し、失敗時は PR マージをブロックする"
+    },
+    "side_effect_analysis": {
+      "existing_usages_checked": [
+        {
+          "file": "fx_trading_system/tests/integration/test_worker_coordinator.py",
+          "line": 188,
+          "usage": "BarBuilder を env 指定なしで tick_aggregation テスト",
+          "impact": "影響なし。Environment 未指定時のデフォルトは RESEARCH のため model_validator は発火しない"
+        },
+        {
+          "file": "fx_trading_system/tests/integration/test_oanda_candle_truth.py",
+          "line": 85,
+          "usage": "BarBuilder に truth_source='tick_aggregation' を直接渡して乖離を実証",
+          "impact": "影響なし。PlatformSettings を構築せず BarBuilder のコンストラクタ引数を直接指定しているため、settings 側 validator を経由しない"
+        },
+        {
+          "file": "fx_trading_system/trading_platform/data/market_data/bar_builder.py",
+          "line": 80,
+          "usage": "BarBuilder 本体のコンストラクタ default=tick_aggregation",
+          "impact": "影響なし。BarBuilder 側は層が異なり、PlatformSettings 検証は settings 側で完結する。両層で一貫性を保つ形"
+        }
+      ],
+      "research_staging_impact": "現行 research/staging で tick_aggregation を使う運用・テストはすべて settings.env != PRODUCTION のため、今回の validator 追加で破壊されない。既存 .env テンプレートに変更は不要",
+      "production_migration": "既に production 運用が稼働している場合、.env に TRUTH_SOURCE=oanda_candle が設定されているはず。設定漏れがあれば起動時に ValidationError で即落ちるが、これは fail-closed として意図的挙動（BT 乖離で silent に誤発注するより安全）"
+    },
+    "parity_contract_alignment": "docs/SHARED_CONTRACT.md の BT/Live 数値一致要件（ATLAS _SimpleFeatureStore と LiveFeatureStore の同一計算）は、入力 OHLC が同一であることを前提とする。truth_source='oanda_candle' 強制はこの前提を production で保証する構造的ガード",
+    "files_to_change": [
+      {"path": "fx_trading_system/trading_platform/config/settings.py", "change": "_enforce_production_truth_source model_validator を追加（約22行）"},
+      {"path": "fx_trading_system/trading_platform/main.py", "change": "BarBuilder 初期化直前に logger.critical('truth_source 選択', ...) を追加（約8行）"},
+      {"path": "fx_trading_system/tests/integration/test_production_truth_source_enforcement.py", "change": "新規作成（5 test cases）"}
+    ],
+    "estimated_loc": 60,
+    "risk_level": "low"
+  },
+  {
+    "finding_id": "PA-R2-006",
+    "root_cause": "StateStore() がデフォルト引数 backend=None で呼ばれたとき無条件に InMemoryBackend() にフォールバックする構造（redis_store.py:102-103 `self._backend: StateStoreBackend = backend or InMemoryBackend()`）。main.py:311 はこの挙動に無自覚で backend 未注入のまま本番起動経路に乗せている。結果として production/staging でも毎回プロセス内メモリにしか状態が載らず、Round 1 で実装した RE-001 state recovery（load_all_positions/load_all_orders/load_account_risk_state）は構造的に常に空データを返す dead code となっていた。根本原因は (a) AioRedisBackend 本体がそもそも未実装、(b) env 別に backend を強制選択する組立層が存在しない、(c) InMemoryBackend が production で使われないことを保証する validator が settings 層に無い、の 3 点複合。event_bus 側は既に redis.asyncio（aioredis）を使用済みで非同期基盤との整合は取れる。",
+    "fix_summary": "(1) redis_store.py に AioRedisBackend を新設（redis.asyncio.Redis を保持、SCAN 非ブロッキング列挙で scan_keys 実装、StateStoreBackend Protocol 完全準拠、connect()/close() 付き）。(2) StateStore コンストラクタの暗黙 InMemory フォールバックを廃止し backend を必須化、ファクトリ build_state_store_from_settings(settings) -> StateStore で env 分岐を集約する（production/staging → AioRedisBackend 必須、接続失敗は fail-closed で RuntimeError／research → redis_url 未設定なら InMemoryBackend を明示許可しログに WARN）。(3) main.py:311 をファクトリ呼び出しに差し替え、startup で backend.connect() を await してから StateStore を組み立てる。(4) settings.py に state_backend Literal['redis','memory','auto']（default='auto'）と state_redis_url（default=None、未設定時は redis_url にフォールバック）を追加し、model_validator で env==production かつ解決済み backend=='memory' を禁止。(5) 起動時に CRITICAL ログで backend 種別・env・masked redis_url を必ず出力。",
+    "files_to_change": [
+      {"path": "trading_platform/data/state_store/redis_store.py", "change": "AioRedisBackend クラス新設（redis.asyncio.from_url で Redis 接続、hset/hget/hgetall/set/get/delete を aioredis にマッピング、scan_keys は SCAN cursor ループで実装し KEYS は禁止、connect()/close() メソッド追加、decode_responses=True）。StateStore.__init__ の `backend or InMemoryBackend()` を削除し引数必須化。末尾に build_state_store_from_settings(settings) -> StateStore ファクトリを追加し env 分岐・CRITICAL ログ・fail-closed を集約。"},
+      {"path": "trading_platform/config/settings.py", "change": "state_backend: Literal['redis','memory','auto']='auto' と state_redis_url: str|None=None を追加。model_validator で env==PRODUCTION かつ state_backend=='memory' を拒否、および env==PRODUCTION で auto 解決時に resolved redis_url が空なら拒否。PA-003 の _enforce_production_snapshot_required と同じパターンで追加。"},
+      {"path": "trading_platform/main.py", "change": "L311 の StateStore() を build_state_store_from_settings(self._settings) に置換。_startup() で backend.connect() を await し失敗時は raise RuntimeError。起動時に logger.critical('StateStore backend resolved', backend=..., env=..., redis_url_masked=...) を必ず出力。_shutdown() で backend.close() を呼ぶ。既存の skip_state_recovery=True 経路は保持（Redis 障害時のエスケープハッチ）。"},
+      {"path": "tests/integration/test_state_store_backend_selection.py", "change": "新設。3 必須シナリオ統合テスト（(a) env=production + redis_url 未設定 → PlatformSettings 構築時 ValidationError、(b) env=production + Redis 接続失敗（unreachable host, connect() で ConnectionError） → main._startup で RuntimeError fail-closed、(c) env=research + redis_url 未設定 → InMemoryBackend で起動成功、CRITICAL ログに backend=memory が出る）。"},
+      {"path": "tests/unit/test_aioredis_backend.py", "change": "新設。AioRedisBackend の hset/hget/hgetall/set/get/delete/scan_keys を fakeredis.aioredis で検証。scan_keys が SCAN コマンドのみ発行し KEYS を呼ばないことを mock で検証（本番ブロッキング禁止の構造保証）。"},
+      {"path": "tests/unit/test_state_store_factory.py", "change": "新設。build_state_store_from_settings の env 分岐を検証（production/staging は redis 強制、research は memory 許容、state_backend='memory' + env=production で ValueError）。"},
+      {"path": "docs/runbook/state_recovery_skip.md", "change": "新設。production で StateStore が InMemory にフォールバックしていた事象の検知・復旧手順（DO-R2 指摘とセット、skip_state_recovery=True のエスケープハッチ条件、startup ログでの backend 種別確認、Redis 復旧後の AccountRiskState 手動再構築、監査要件）。"},
+      {"path": "docs/SHARED_CONTRACT.md", "change": "StateStoreBackend Protocol の backend 必須化を breaking change として記録。build_state_store_from_settings を公式ファクトリとして明記。"}
+    ],
+    "regression_prevention": {
+      "tests": [
+        "integration: env=production + redis_url 未設定で PlatformSettings 構築が ValidationError",
+        "integration: env=production + Redis 接続失敗（unreachable host, connect() 例外）で main._startup RuntimeError（fail-closed 確認）",
+        "integration: env=research + redis_url 未設定で InMemoryBackend で起動成功、CRITICAL ログに backend=memory が出る",
+        "unit: StateStore(backend=None) が TypeError（暗黙フォールバック禁止の構造保証）",
+        "unit: AioRedisBackend.scan_keys が fakeredis/mock で SCAN コマンドのみ発行、KEYS 不使用を検証",
+        "unit: settings.model_validator が env=production + state_backend=memory を拒否",
+        "unit: settings.model_validator が env=production + auto + redis_url 空 を拒否"
+      ],
+      "logs": [
+        "startup 時 logger.critical('StateStore backend resolved', backend='redis'|'memory', env=..., redis_url_masked=...) を必ず出力（CRITICAL は Loki/Prometheus でアラート化可能）",
+        "InMemoryBackend が選択された際は追加で logger.warning('StateStore is ephemeral, state will be lost on restart', runbook='docs/runbook/state_recovery_skip.md') を出力",
+        "AioRedisBackend.connect() 失敗時は logger.critical('StateStore Redis connection failed — fail-closed', error=...) を出してから raise"
+      ],
+      "runbook": [
+        "docs/runbook/state_recovery_skip.md 新設: (1) 症状『再起動後に KillSwitch 解除 / daily_realized_pnl=0 / ポジション消失』(2) 検知方法『startup ログの backend=memory、または state_recovery の復元件数=0 メトリクス』(3) 復旧手順『Redis 起動確認 → state_backend=redis で再起動 → AccountRiskState 手動再構築』(4) skip_state_recovery=True の例外適用条件 (5) 監査要件（production で backend=memory が出たら即座にインシデント起票）"
+      ]
+    },
+    "side_effects": "Round 1 修正への影響: (a) RE-001 (d99a425) load_all_positions/load_all_orders/load_account_risk_state が初めて実データを返すようになり state recovery が実効化。scan_keys は SCAN 実装なので本番ブロッキング懸念なし。(b) PA-003 (e4ef35e) SnapshotWriter 自体は無関係だが、env 別 fail-closed の構造パターン（model_validator で production 強制）を踏襲するため整合性向上。(c) RE-002 (de75c08) AccountRiskState 永続化が再起動後も保持され KillSwitch 再活性が初めて機能。(d) RE-008 (35612c5) skip_state_recovery=True エスケープハッチは残存するが、runbook 側で『Redis 不能時の短期回避』に用途を限定する記述を追加。StateStore(backend=None) を直接使っているテストコードは機械置換が必要（推定 15〜25 箇所、InMemoryBackend() 明示化）。event_bus の redis.asyncio との接続プールは別インスタンスになるが DB 番号分離で衝突回避可能。",
+    "dependencies": [
+      "RE-R2-010 (_processed_fills persist) はこの修正後に初めて意味を持つ（現状は InMemory なので永続化実装しても再起動で消える）",
+      "RE-R2-011 / RE-R2-012 / QT-009 も本修正が前提（state recovery が空データを返す限り前提不成立）",
+      "DO-R2 の runbook 整備指摘とセットで docs/runbook/state_recovery_skip.md を新設",
+      "DE-R2-009 は本修正で同時解消（validation.json:520-522 の duplicate_of 関係）"
+    ],
+    "estimated_loc": 420,
+    "risk_level": "medium"
+  },
+  {
+    "finding_id": "RE-R2-012",
+    "root_cause": "KillSwitch.evaluate_and_activate() は check() 経由で HARD_LIMITS.kill_switch_daily_loss (15%) 閾値でしか発動せず、PTRC-Post Level 3 (10-15% 帯で kill_switch アクションを発行) からの連鎖呼び出しが coordinator.py:516 で evaluate_and_activate() を使っているため 15% 未満では常に早期リターン。結果、10-15% の段階的保護が完全に空白化。",
+    "commit_type": "[fix:bug]",
+    "fix_summary": "KillSwitch に force_activate(reason: str, source: str) メソッドを追加（閾値判定をスキップして直接 _activate を呼ぶ、ただし既発動時の冪等性と state_store 永続化は evaluate_and_activate と同等に担保）。coordinator.py:516 の呼び出しを force_activate(reason='ptrc_post_level3', source='post_trade_risk') に差し替え。",
+    "files_to_change": [
+      {"path": "trading_platform/core/risk_engine/circuit_breaker.py", "change": "KillSwitch に force_activate(reason, source) async メソッド追加。is_kill_switch_active チェック + logger.critical + await self._activate() のみ。約15行"},
+      {"path": "trading_platform/core/execution_engine/coordinator.py", "lines": "514-522", "change": "action.action_type == 'kill_switch' 分岐内の evaluate_and_activate() を force_activate(reason=f'ptrc_post_{action.details.get(\"trigger\",\"unknown\")}', source='post_trade_risk') に差し替え"},
+      {"path": "tests/unit/test_kill_switch_force_activate.py", "change": "新設。(a) force_activate が 5% drawdown (15% 未満) でも KS を発動させること、(b) 既発動時は no-op かつ False を返すこと、(c) state_store が配線されていれば is_kill_switch_active=True が永続化されること、(d) reason/source が logger.critical に含まれること、を検証"}
+    ],
+    "regression_prevention": {
+      "tests": [
+        "unit: force_activate が check() をスキップし 15% 未満で発動",
+        "unit: 既発動時の冪等性（二重 _activate を呼ばない）",
+        "unit: state_store 永続化経路（RE-001 と同じ AccountRiskState）",
+        "integration: coordinator._run_post_trade_risk が PTRC-Post Level 3 action で force_activate を呼び、Round 1 RE-001 の restore_from_state で再起動後も KS=True 維持"
+      ]
+    },
+    "side_effects": "既存 evaluate_and_activate は保持（自動発動経路=fill 毎の閾値チェックは変更なし）。force_activate は PTRC-Post 経由の明示発動専用。Round 1 RE-001 (d99a425) の state_store 永続化と完全整合。",
+    "dependencies": [
+      "PA-R2-006 が前提（Redis backend 不在なら state_store 永続化は無意味） — ただし本修正自体は PA-R2-006 未解決でも独立実装可能（段階的保護が 10-15% 帯で有効化されるだけでも価値がある）"
+    ],
+    "estimated_loc": 40,
+    "risk_level": "low"
+  }
+]

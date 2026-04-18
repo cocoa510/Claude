@@ -1,0 +1,95 @@
+{
+  "round": 2,
+  "reviewer": "devils-advocate",
+  "review_date": "2026-04-18",
+  "reviews": [
+    {
+      "finding_id": "QT-R2-002",
+      "verdict": "approved_with_conditions",
+      "conditions": [
+        "閾値 0.05->0.001 の根拠を spec_change_log.md に定量記録すること: total_bars=99530 基準での 0.001 上限(=99.5トレード)の計算式を明示。現設計は Gen003 ケーススタディ 1 件のみで閾値を決定しており系統的キャリブレーション不足",
+        "[change:spec] 手順に従い tests/golden/fixtures/*.json に fill_rate フィールドが存在しないことを実際に確認し記録してからコミットすること。設計では断言しているが未検証",
+        "atlas-status / atlas-compare での旧定義 fill_rate (Gen001-018) と新定義値の横断比較時に誤警告が出ないよう metrics_schema_version ガードを比較ロジックに実装すること"
+      ],
+      "side_effect_risks": [
+        "閾値 50 倍低下により weakness_detector の過剰トレード指摘がほぼゼロになる。本当に過剰トレードの戦略が検出漏れになる逆バイアスが生じる。設計はこのトレードオフを楽観的に扱っている",
+        "result_parser.py の data_bars=None フォールバックが残存するため旧フォーマット BT 結果では旧バグ挙動が温存される。この分岐の発生頻度を監視すること",
+        "METRICS_SCHEMA_VERSION 4.6.0->4.7.0 インクリメントで atlas-loop 収束判定が schema_version 不一致 warning を多発する可能性がある"
+      ],
+      "alternative_suggestions": [
+        "defaults.py に WEAKNESS_FILL_RATE_THRESHOLD = 0.001 として定数化し計算根拠をコメントで明記する方が後続再キャリブレーション耐性が高い",
+        "旧定義 fill_rate の result.json は weakness_detector のチェックをスキップする経路を設ける方が旧世代混在問題を根本解消できる"
+      ],
+      "reviewer_notes": "根本原因診断は正確で修正方向は正しい。ただし閾値根拠が 1 件のケーススタディのみである点と Gen001-018 との混在問題を楽観視している点に条件を付ける。実装を止める理由にはならない。"
+    },
+    {
+      "finding_id": "QT-008",
+      "verdict": "approved_with_conditions",
+      "conditions": [
+        "additional_false_greens_found に記載の test_reconnect_cycle.py:245 も同一 PR で修正すること。同一パターンの偽緑を半修正で放置すると CI 信頼性回復の目的が半減する",
+        "scripts/lint_false_green.py の CI 組み込み方法(どの workflow ステップか)を設計に明記すること。実装後に CI 連携が後回しになるリスクがある"
+      ],
+      "side_effect_risks": [
+        "assert 修正により coordinator の order_id が O- プレフィックスを持たない場合にテストが初めて失敗する。本番コードの欠陥が顕在化する望ましい副作用だが Phase 4 実装者が誤認してアサートを緩めるリスクがある"
+      ],
+      "alternative_suggestions": [
+        "カスタム AST チェッカー新設より ruff RUF015 または flake8-bugbear B017 を CI に追加する方が保守コストが低い"
+      ],
+      "reviewer_notes": "修正内容は正確で副作用は限定的。test_reconnect_cycle.py の偽緑を同一 PR に含めない設計が意図的か否か不明のため条件として付与する。"
+    },
+    {
+      "finding_id": "DE-004",
+      "verdict": "approved_with_conditions",
+      "conditions": [
+        "staging で truth_source=tick_aggregation を許容し続ける方針に対し staging 起動時に WARNING ログで production と挙動が異なることを明示すること。staging が production のリハーサルとして機能しない設定ドリフトを可視化する",
+        "production デプロイ直後に ValidationError が発生した場合の緊急ロールバック手順を runbook に明記すること。既存 production で .env 設定漏れがある場合の起動ループシナリオ(systemd Restart=always 等)への対処も含めること"
+      ],
+      "side_effect_risks": [
+        "自動リスタートが設定された production 環境で .env 設定漏れがあると ValidationError の起動ループに陥りアラートが飽和する可能性がある",
+        "Pydantic v2 の frozen=False では設定後の属性直書きが可能なため テストコードが model_validator をバイパスする書き換えパターンを使っていないか確認すること"
+      ],
+      "alternative_suggestions": [
+        "staging でも truth_source=oanda_candle をデフォルトにし tick_aggregation を明示指定時のみ許可する方式が production だけ特殊という設定ドリフト問題を根本解消できる。後方互換のため即時変更は不可だがロードマップとして docs に記載することを推奨する"
+      ],
+      "reviewer_notes": "PA-003 パターンを踏襲した整合性の高い設計。根本原因診断は正確。設定ドリフト問題は残存するが段階的対処として妥当。条件付き承認。"
+    },
+    {
+      "finding_id": "PA-R2-006",
+      "verdict": "approved_with_conditions",
+      "conditions": [
+        "[必須] Stage A(settings.py model_validator + main.py CRITICAL ログのみ, 推定 30 LOC)を先行リリースし Stage B(AioRedisBackend 本体 + ファクトリ + main.py 切替)を follow-up PR とする段階的実装を採用すること。Stage A だけで production InMemory 誤配線を fail-closed に変換でき 420 LOC 一括変更のロールバックリスクを大幅に低減する",
+        "[必須] Stage B 実施前に QT-006(PositionReconciler の reconcile 呼び出し漏れ)を先に修正すること。AioRedisBackend で load_all_positions が初めて実データを返すと reconcile 未実行のゾンビ注文が OANDA 側と照合されないままポジション不整合が発生するリスクがある",
+        "StateStore(backend=None) の TypeError 化は Stage B 内でも最後に行うこと。test_phase3_risk_execution.py の StateStore() 無引数呼び出し 6 箇所を含む実際の影響箇所リスト(grep 確認: 推定 15 箇所)と置換スクリプトを PR に含めること",
+        "AioRedisBackend の connection pool パラメータ(max_connections, socket_timeout, socket_connect_timeout)を既存 event_bus の redis.asyncio 設定と統一すること",
+        "build_state_store_from_settings で staging を redis 強制にする設計について Redis が利用できないローカル開発者環境での挙動を明確化すること"
+      ],
+      "side_effect_risks": [
+        "[高] RE-001(d99a425)の state recovery が実データを返すようになることで QT-006 未解決のゾンビ注文照合漏れが顕在化する。PA-R2-006 Stage B と QT-006 の実装順序を明示的に管理すること",
+        "[中] event_bus redis.asyncio と AioRedisBackend が別接続プールを持つ場合 Redis の max_connection 制限超過リスクがある。接続プール数の見積もりを明示すること",
+        "[中] skip_state_recovery=True エスケープハッチ使用中に前回 KS 発動状態が Redis に保存されている場合 skip=True での起動は KS=False で再開される。Redis 障害と KS 発動の重複シナリオを runbook に明記すること"
+      ],
+      "alternative_suggestions": [
+        "Stage A: settings.py の model_validator(env=production かつ state_backend=memory を拒否)と main.py の backend 種別 CRITICAL ログのみ。推定 30 LOC。ゼロリスクで即効性あり",
+        "Stage B: AioRedisBackend 実装 + ファクトリ + main.py 切替 + テスト群。Stage A が 1 週間以上 production 安定稼働後に実施"
+      ],
+      "reviewer_notes": "修正の必要性と根本原因診断に異論なし。問題は 420 LOC 一括変更という実装リスクと QT-006 との実装順序依存。段階的実装を条件とすることで Phase 4 のリスクを大幅に低減できる。Stage A 先行は abandon を避けながら safety を最大化する最善手と判断する。"
+    },
+    {
+      "finding_id": "RE-R2-012",
+      "verdict": "approved_with_conditions",
+      "conditions": [
+        "force_activate の docstring に使用ガイドラインを明記すること: evaluate_and_activate は fill 毎の自動閾値チェック経路専用、force_activate は外部リスクシステムが明示的に発動を決定した場合専用。呼び出し元が reason/source に発動根拠を記録する責任を持つことを明記する",
+        "integration テスト(coordinator が PTRC-Post Level 3 で force_activate を呼び再起動後も KS=True 維持)に @pytest.mark.requires_redis_backend マーカーを付け PA-R2-006 Stage B 完了後に有効化する設計にすること。現状 InMemory のため再起動後 KS=True は保証されずテストが常に成功するが実態を保証しない"
+      ],
+      "side_effect_risks": [
+        "[低] RE-R2-011(entry_stop/strategy_pause/size_limit の silent drop)が未修正のまま force_activate のみ追加されると Level 3 だけ有効で他の段階保護が空白という中途半端な状態になる。RE-R2-011 との同時実装を推奨するが独立実装も可能",
+        "[低] reason パラメータが自由文字列のため監査ログの集計が困難になる可能性がある。ActivationReason Literal 型または Enum の定義を検討すること"
+      ],
+      "alternative_suggestions": [
+        "evaluate_and_activate に bypass_threshold: bool = False を追加する代替設計もあるが force_activate という別メソッドの方が意図明確で誤使用リスクが低いという現設計判断は妥当"
+      ],
+      "reviewer_notes": "根本原因診断は正確で修正は最小限。evaluate_and_activate と force_activate の使い分けは docstring 整備で誤使用リスクを許容範囲に収められる。PA-R2-006 との依存関係を設計が正直に記載している点は評価する。integration test の skip 条件化のみ条件として付ける。"
+    }
+  ],
+  "overall_summary": "5件中 abandon はゼロ、全件 approved_with_conditions。最大リスクは PA-R2-006 の 420 LOC 一括変更: Stage A(設定 validator + ログ, 30 LOC)先行・Stage B(AioRedisBackend 本体) follow-up の段階的実装を必須条件とする。PA-R2-006 Stage B の前提として QT-006(PositionReconciler の reconcile 呼び出し漏れ)を先行修正することを強く求める。QT-R2-002 は閾値根拠の定量化と旧世代混在処理が条件。RE-R2-012 は docstring 整備と PA-R2-006 依存テストの skip 条件化が条件。DE-004 は staging ドリフト警告追加とデプロイ runbook が条件。QT-008 は test_reconnect_cycle.py の偽緑も同一 PR に含めることが条件。"
+}

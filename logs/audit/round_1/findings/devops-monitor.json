@@ -1,0 +1,115 @@
+{
+  "agent": "devops-monitor",
+  "findings": [
+    {
+      "id": "DO-001",
+      "severity": "high",
+      "area": "monitoring/healthcheck",
+      "title": "HealthChecker は StrategyWorker の生死を監視しない",
+      "description": "CRITICAL_COMPONENTS は {redis, oanda, event_bus} のみ。StrategyWorker・ExecutionCoordinator・PositionReconciler はどれも prober 登録も staleness 更新もない。Worker が asyncio タスクの例外でサイレントクラッシュしても HealthChecker は 'healthy' を返し続ける。main.py:207-209 で coordinator と broker が register() されるが、prober は登録されず staleness が更新されないため 30 秒後に degraded になる。Worker は一切登録されない。",
+      "evidence": [
+        "trading_platform/core/monitoring/health_check.py:35 — CRITICAL_COMPONENTS = frozenset({'redis', 'oanda', 'event_bus'})",
+        "trading_platform/main.py:207-209 — register('event_bus'), register('coordinator'), register('broker') のみ、worker 未登録",
+        "trading_platform/core/monitoring/health_check.py:396-426 — staleness 判定は prober 非登録コンポーネントのみ対象"
+      ],
+      "suggested_fix": "StrategyWorker に is_alive プロパティ（最終バー処理時刻から判定）を追加し、_build_probers() 内でループして register_prober() する。ExecutionCoordinator と PositionReconciler も同様に prober を登録する。"
+    },
+    {
+      "id": "DO-002",
+      "severity": "high",
+      "area": "monitoring/healthcheck",
+      "title": "OANDA 認証検証が GET /accounts/{id} の HTTP 200 だけで行われる",
+      "description": "oanda_prober は REST エンドポイントに GET して status==200 なら True を返す。セッション認証失敗（401）はFalse になるが、OANDA が Streaming 接続中にトークン失効した場合（REST は有効、Stream は切断状態）を検知できない。OANDA Streaming 接続状態は HealthChecker の監視対象外。",
+      "evidence": [
+        "trading_platform/main.py:450-462 — oanda_prober: REST GET /v3/accounts/{id} のみ",
+        "trading_platform/data/market_data/stream_receiver.py — ストリーム健全性を HealthChecker に通知する呼び出しなし"
+      ],
+      "suggested_fix": "OANDAStreamReceiver に is_streaming プロパティ（最終 tick 受信時刻ベース）を追加し、oanda_prober をストリーム生死確認も組み合わせた複合チェックに変更する。"
+    },
+    {
+      "id": "DO-003",
+      "severity": "critical",
+      "area": "metrics/export",
+      "title": "fx_open_positions ゲージを更新するコードパスが存在しない",
+      "description": "MetricsCollector は fx_open_positions Gauge を登録しているが、それを更新するメソッド（set_open_positions() 相当）がクラスに存在しない。Gauge は初期値 0 のまま永久に更新されない。Prometheus でオープンポジション数を監視できず、ポジションが積み上がってもアラートが発火しない。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:99-103 — fx_open_positions Gauge 登録",
+        "trading_platform/core/monitoring/metrics.py:258-565 — set_open_positions() メソッド定義なし",
+        "grep 結果: codebase 全体で _gauges[\"positions\"] への書き込みが 1 件もない"
+      ],
+      "suggested_fix": "MetricsCollector に set_open_positions(instrument: str, count: float) メソッドを追加し、FillProcessor のポジション更新後（またはコーディネータの fill 完了時）に呼び出す。"
+    },
+    {
+      "id": "DO-004",
+      "severity": "high",
+      "area": "metrics/export",
+      "title": "Event Bus キュー深度（bus_queue_depth）メトリクスが存在しない",
+      "description": "MetricsCollector には fx_event_bus_latency_ms ヒストグラムはあるが、現在の未処理イベント数（キュー深度）を示す Gauge が存在しない。Redis PubSub バックログが増大しても観測手段がない。alerting_rules.yml にも対応アラートなし。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py — bus_queue_depth に相当する Gauge 定義なし",
+        "deploy/prometheus/alerting_rules.yml — Event Bus キュー深度に関するアラートルールなし"
+      ],
+      "suggested_fix": "MetricsCollector に set_event_bus_queue_depth(depth: int) を追加し、RedisEventBus の定期ステータス収集で更新する。alerting_rules.yml に FxEventBusQueueDepthHigh アラートを追加する。"
+    },
+    {
+      "id": "DO-005",
+      "severity": "high",
+      "area": "alerting/thresholds",
+      "title": "フィード陳腐化（stale feed）に対するアラートルールが存在しない",
+      "description": "metrics.py に fx_feature_staleness_sec Gauge は定義・実装されているが、alerting_rules.yml に対応するアラートルール（例: feature_staleness_sec > 閾値）が存在しない。Tick が止まって LiveFeatureStore の特徴量が古くなっても自動通知されない。PTRC や戦略判断は陳腐化した特徴量を使い続ける可能性がある。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:235-238 — fx_feature_staleness_sec Gauge 定義",
+        "deploy/prometheus/alerting_rules.yml — feature_staleness に関するルールなし（全96行確認済み）"
+      ],
+      "suggested_fix": "alerting_rules.yml に FxFeatureStale アラートを追加する（例: fx_feature_staleness_sec > 120 for 1m, severity=critical）。"
+    },
+    {
+      "id": "DO-006",
+      "severity": "high",
+      "area": "alerting/thresholds",
+      "title": "PositionReconciler ミスマッチに対する Prometheus メトリクスとアラートが未実装",
+      "description": "position_mismatch.md の検知表に「position_reconciler_mismatch_total カウンタが増加（実装済みの場合）」と注記があり、実装が条件付きであることを自認している。PositionReconciler コードに MetricsCollector 呼び出しは一切なく、不整合が発生しても Prometheus では検知不可能。",
+      "evidence": [
+        "trading_platform/core/execution_engine/position_reconciler.py — _metrics 参照なし（grep 確認済み）",
+        "docs/runbook/position_mismatch.md:19 — 「実装済みの場合」という条件付き記述",
+        "deploy/prometheus/alerting_rules.yml — position_reconciler に関するアラートルールなし"
+      ],
+      "suggested_fix": "PositionReconciler に MetricsCollector を注入し、不整合検知ごとに inc_reconciler_mismatch(instrument) を呼ぶ。alerting_rules.yml に FxPositionMismatch アラートを追加する。"
+    },
+    {
+      "id": "DO-007",
+      "severity": "high",
+      "area": "logging/hot_path",
+      "title": "stream_receiver._handle_price() の WARN パスで logger.info を毎 Tick 呼ぶ可能性",
+      "description": "DataQualityEngine の verdict が WARN の場合、_handle_price() 内で logger.info('FTS-DATA-006 Tick 品質 warn', ...) が呼ばれる。WARN判定が連続する相場（スプレッド拡大など）では毎 Tick（数百ms 間隔）で INFO ログが出力され、ログボリュームが爆増する。同パスで inc_data_quality_warn も呼ばれるため Prometheus カウンタも問題ないが、ログ I/O がボトルネックになる。",
+      "evidence": [
+        "trading_platform/data/market_data/stream_receiver.py:322-331 — WARN 分岐内 logger.info",
+        "同ファイル:283-333 — _handle_price() は全 Tick を処理するホットパス"
+      ],
+      "suggested_fix": "WARN ログを logger.debug に下げるか、rate limiting（連続 WARN 時は N 件に 1 件だけログ出力）を実装する。"
+    },
+    {
+      "id": "DO-008",
+      "severity": "high",
+      "area": "dashboard",
+      "title": "Streamlit ダッシュボードが time.sleep() でメインスレッドをブロックし再描画が遅延する",
+      "description": "auto_refresh モード時、main() 末尾で time.sleep(REFRESH_INTERVAL_SEC=5) を呼んだ後 st.rerun() する実装になっている。Streamlit のメインスレッドをブロッキングスリープで止めることは推奨されておらず、Streamlit の Fragment/auto-refresh API が利用できる環境では応答性が著しく低下する。Kill Switch 発動直後にダッシュボードが 5 秒間表示を更新しない可能性がある。",
+      "evidence": [
+        "trading_platform/dashboard/app.py:177-180 — time.sleep(REFRESH_INTERVAL_SEC); st.rerun()"
+      ],
+      "suggested_fix": "st.rerun(scope='fragment') + @st.fragment(run_every=5) パターン、または streamlit-autorefresh ライブラリを使用してノンブロッキング更新に変更する。"
+    },
+    {
+      "id": "DO-009",
+      "severity": "high",
+      "area": "runbook",
+      "title": "部分約定（partial fill）の専用 Runbook が存在しない",
+      "description": "position_mismatch.md に「数量が違う → 一部約定が処理されていない（partial fill）」という記載はあるが、partial fill の独立した対応手順書が存在しない。partial fill が発生した際の確認コマンド・正常化手順・エスカレーション先が明文化されていない。OANDA がヘッジングモデルで部分約定を返す場合のフローが不明確。",
+      "evidence": [
+        "docs/runbook/ 配下のファイル一覧: circuit_breaker_triggered.md, data_quality_alert.md, kill_switch_triggered.md, log_rotation.md, oanda_disconnect.md, position_mismatch.md, redis_disconnect.md — partial_fill.md なし",
+        "docs/runbook/position_mismatch.md:59,77 — partial fill に言及するが手順は未定義"
+      ],
+      "suggested_fix": "docs/runbook/partial_fill.md を作成し、部分約定の検知方法（SUBMITTED 状態の Order が一定時間後も残留している場合）・FillProcessor での処理確認手順・OANDA API での実注文確認手順を記述する。"
+    }
+  ]
+}

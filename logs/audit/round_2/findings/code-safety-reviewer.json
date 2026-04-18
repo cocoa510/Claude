@@ -1,0 +1,117 @@
+{
+  "agent": "code-safety-reviewer",
+  "round": 2,
+  "findings": [
+    {
+      "id": "CS-001",
+      "severity": "high",
+      "area": "validator/sandbox_builtins",
+      "title": "__import__ in SANDBOX_BUILTINS enables forbidden-module loading bypassing Stage 1 AST check",
+      "description": "sandbox_builtins.py:29 includes live __import__. sandbox_runner.py:739 injects it as module.__builtins__. Strategy code aliases it (f=__import__) and calls f(forbidden_module); the alias AST node is not ast.Name(__import__) so Stage 1 passes. All FORBIDDEN_MODULES reachable. Confirmed.",
+      "evidence": [
+        "atlas/common/sandbox_builtins.py:29",
+        "atlas/validator/syntax_checker.py:52-57",
+        "atlas/validator/sandbox_runner.py:739"
+      ],
+      "suggested_fix": "Replace raw __import__ with filtered _safe_import that raises ImportError when module root in FORBIDDEN_MODULES.",
+      "carryover_from_round_1": true
+    },
+    {
+      "id": "CS-002",
+      "severity": "high",
+      "area": "validator/sandbox_runner",
+      "title": "Memory monitor compares whole-process RSS with no baseline; valid strategies rejected in long loops",
+      "description": "_mem_poll() lines 103-122 compares proc RSS against 512MB with no baseline. __init__ lines 78-87 does not record baseline_rss. In long loops prior-gen residual RSS accumulates causing all new strategies to fail MemoryError. Confirmed.",
+      "evidence": [
+        "atlas/validator/sandbox_runner.py:103-122",
+        "atlas/validator/sandbox_runner.py:78-87"
+      ],
+      "suggested_fix": "In __init__ add self._baseline_rss = psutil.Process().memory_info().rss. In _mem_poll check: if (rss - self._baseline_rss) > _MEM_LIMIT_BYTES.",
+      "carryover_from_round_1": true
+    },
+    {
+      "id": "CS-003",
+      "severity": "high",
+      "area": "validator/sandbox_runner",
+      "title": "Stage 3 exception threshold is absolute count 4; broken strategies with TypeError or AttributeError may pass",
+      "description": "run_sandbox() lines 389-407 fails only at count>=5. 4/200 bars crashing gets PASS+WARNING lines 420-423. TypeError and AttributeError are deterministic bugs. No rate-based gate. Confirmed.",
+      "evidence": [
+        "atlas/validator/sandbox_runner.py:389-407",
+        "atlas/validator/sandbox_runner.py:420-423"
+      ],
+      "suggested_fix": "Post-loop: exception_rate = len(result.exceptions_caught) / bars_tested; if > 0.01 set passed=False. Immediately FAIL on TypeError or AttributeError.",
+      "carryover_from_round_1": true
+    },
+    {
+      "id": "CS-004",
+      "severity": "high",
+      "area": "backtest/vectorbt_engine",
+      "title": "_SimpleFeatureStore NaN fallback invisible to run_layer1; broken strategy may reach Layer 2",
+      "description": "vectorbt_engine.py lines 362-376: non-ValueError indicator exceptions fill NaN and append to _feature_compute_errors. run_layer1 lines 785-844 never checks _feature_compute_errors. Strategy runs on NaN features and may pass L1 thresholds. Confirmed no read-side check.",
+      "evidence": [
+        "atlas/backtest/vectorbt_engine.py:362-376",
+        "atlas/backtest/vectorbt_engine.py:785-844"
+      ],
+      "suggested_fix": "After _generate_signals_vectorized in run_layer1: if getattr(feature_store, _feature_compute_errors, None): return Layer1Result(passed=False, error=str(feature_store._feature_compute_errors)).",
+      "carryover_from_round_1": true
+    },
+    {
+      "id": "CS-005",
+      "severity": "high",
+      "area": "backtest/event_simulator",
+      "title": "L2 param-sensitivity trial failures at DEBUG only; all-failure returns None silently",
+      "description": "_run_l2_param_sensitivity line 1222 uses logger.debug. At INFO level all failures invisible. When all fail len(pfs)<5 returns None (line 1228) and Gate 11 fails silently. Lines 1137/1153 were raised to warning in Round 1 but exc_info=True missing. Line 1222 remains debug. Confirmed.",
+      "evidence": [
+        "atlas/backtest/event_simulator.py:1222",
+        "atlas/backtest/event_simulator.py:1137",
+        "atlas/backtest/event_simulator.py:1153"
+      ],
+      "suggested_fix": "Line 1222: raise to logger.warning with exc_info=True. Lines 1137 and 1153: add exc_info=True to existing logger.warning calls.",
+      "carryover_from_round_1": true
+    },
+    {
+      "id": "CS-007",
+      "severity": "high",
+      "area": "backtest/event_simulator",
+      "title": "equity[0]<=0 fallback total_return_pct=0.0 enables false Gate 13 PASS in bear-market periods",
+      "description": "_compute_metrics lines 832-840: equity[0]<=0 sets total_return_pct=0.0. bh_excess_return_pct line 881: 0.0 - bh_return_pct * exposure. When bh_return_pct negative (e.g. -10 pct exposure=0.3) result is +3.0 passing Gate 13. Corrupted BT falsely shows alpha. Confirmed lines 832 and 881.",
+      "evidence": [
+        "atlas/backtest/event_simulator.py:832-840",
+        "atlas/backtest/event_simulator.py:881",
+        "atlas/backtest/runner.py:443-448"
+      ],
+      "suggested_fix": "When equity[0]<=0 set total_return_pct=None and bh_excess_return_pct=None. _check() returns False for None; Gate 13 correctly fails.",
+      "carryover_from_round_1": true
+    },
+    {
+      "id": "CS-008",
+      "severity": "high",
+      "area": "backtest/event_simulator",
+      "title": "on_fill called with raw dict instead of FillEvent Pydantic model; type safety bypassed at all call sites",
+      "description": "event_simulator.py calls strategy.on_fill() with raw dicts at lines 516-518, 538, 585-590, 598, 607. FillEvent model exists in models.py:123-129 but never used. CLAUDE.md forbids dict[str,Any] direct passing. FLAT fills omit size key. Untrusted strategy on_fill feeding position state has no validation. NEW finding Round 2.",
+      "evidence": [
+        "atlas/backtest/event_simulator.py:516-518",
+        "atlas/backtest/event_simulator.py:538",
+        "atlas/backtest/event_simulator.py:585-590",
+        "atlas/backtest/event_simulator.py:598",
+        "atlas/backtest/event_simulator.py:607",
+        "atlas/common/models.py:123-129"
+      ],
+      "suggested_fix": "At all on_fill call sites construct FillEvent(...).model_dump() and pass that dict. Update Strategy ABC on_fill annotation to accept FillEvent or dict.",
+      "carryover_from_round_1": false
+    },
+    {
+      "id": "CS-009",
+      "severity": "high",
+      "area": "common/models",
+      "title": "TradeSignal and StrategyConfig lack extra=forbid; extra fields from untrusted code silently accepted",
+      "description": "models.py TradeSignal line 62 and StrategyConfig line 84 use Pydantic v2 default extra=ignore. Untrusted generate_signal() returning TradeSignal with extra fields validates without error. No ConfigDict(extra=forbid) present. CLAUDE.md mandates thorough Pydantic I/O validation. Confirmed no ConfigDict in models.py.",
+      "evidence": [
+        "atlas/common/models.py:62",
+        "atlas/common/models.py:84"
+      ],
+      "suggested_fix": "Add model_config = ConfigDict(extra=forbid) to TradeSignal and StrategyConfig. FillEvent may keep extra=ignore for dict compatibility.",
+      "carryover_from_round_1": true
+    }
+  ]
+}

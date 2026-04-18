@@ -1,0 +1,94 @@
+{
+  "agent": "code-safety-reviewer",
+  "findings": [
+    {
+      "id": "CS-001",
+      "severity": "high",
+      "area": "validator/sandbox_builtins",
+      "title": "__import__ in SANDBOX_BUILTINS enables dynamic forbidden-module loading, bypassing Stage 1 AST check",
+      "description": "sandbox_builtins.py line 29 includes the live __import__ callable. Stage 1 AST checker (syntax_checker.py:52-57) catches direct ast.Name references to __import__, but once the sandbox injects the live callable via module.__builtins__ = _SANDBOX_BUILTINS (sandbox_runner.py:739), strategy code can alias it (f = __import__) and call f(chr(111)+chr(115)). The ast.Name for the alias is not __import__, so Stage 1 passes. All FORBIDDEN_MODULES are reachable.",
+      "evidence": [
+        "atlas/common/sandbox_builtins.py:29",
+        "atlas/validator/syntax_checker.py:52-57",
+        "atlas/validator/sandbox_runner.py:739"
+      ],
+      "suggested_fix": "Replace raw __import__ with a filtered wrapper that checks name.split(chr(46))[0] against FORBIDDEN_MODULES before forwarding."
+    },
+    {
+      "id": "CS-002",
+      "severity": "high",
+      "area": "validator/sandbox_runner",
+      "title": "Memory monitor uses whole-process RSS without baseline; causes false positives in long atlas-loops",
+      "description": "_SandboxWorker._mem_poll() lines 103-122 compares proc.memory_info().rss directly against _MEM_LIMIT_BYTES=512MB with no baseline snapshot. In a long atlas-loop, prior-generation residual memory accumulates. If process RSS baseline already exceeds 512MB from prior generations, every subsequent valid strategy is immediately rejected. __init__ does not record baseline_rss.",
+      "evidence": [
+        "atlas/validator/sandbox_runner.py:103-122",
+        "atlas/validator/sandbox_runner.py:78-87"
+      ],
+      "suggested_fix": "In __init__ add: self._baseline_rss = psutil.Process().memory_info().rss. In _mem_poll check: if (rss - self._baseline_rss) > _MEM_LIMIT_BYTES."
+    },
+    {
+      "id": "CS-003",
+      "severity": "high",
+      "area": "validator/sandbox_runner",
+      "title": "Stage 3 exception threshold is absolute count (4 allowed) not rate-based; logic-broken strategies may pass",
+      "description": "run_sandbox() lines 389-407 accumulates exceptions and only fails at count >= 5. A strategy crashing 4/200 bars (2%) receives Stage 3 PASS with WARNING (lines 420-423). No rate-based gate exists. TypeError and AttributeError indicate deterministic code bugs and should trigger immediate FAIL.",
+      "evidence": [
+        "atlas/validator/sandbox_runner.py:389-407",
+        "atlas/validator/sandbox_runner.py:420-423"
+      ],
+      "suggested_fix": "After the loop compute exception_rate = len(result.exceptions_caught) / bars_tested. If > 0.01, set result.passed=False. Immediately fail on TypeError or AttributeError regardless of count."
+    },
+    {
+      "id": "CS-004",
+      "severity": "high",
+      "area": "backtest/vectorbt_engine",
+      "title": "_SimpleFeatureStore NaN fallback on compute error is invisible to run_layer1; broken strategy may reach Layer 2",
+      "description": "vectorbt_engine.py lines 362-376: on any non-ValueError exception from an indicator, the code logs an error, fills the feature with NaN, appends to _feature_compute_errors, and continues. run_layer1 never inspects _feature_compute_errors after _generate_signals_vectorized (lines 785-791). Strategy runs on NaN features, may meet lenient L1 thresholds, and proceed to Layer 2 as fundamentally broken.",
+      "evidence": [
+        "atlas/backtest/vectorbt_engine.py:362-376",
+        "atlas/backtest/vectorbt_engine.py:374-376",
+        "atlas/backtest/vectorbt_engine.py:785-791"
+      ],
+      "suggested_fix": "After _generate_signals_vectorized in run_layer1, add: if getattr(feature_store, \"_feature_compute_errors\", None): return Layer1Result(passed=False, error=str(feature_store._feature_compute_errors))."
+    },
+    {
+      "id": "CS-005",
+      "severity": "high",
+      "area": "backtest/event_simulator",
+      "title": "L2 sensitivity trial failures at DEBUG level only; cost-stress failures lose traceback",
+      "description": "_run_l2_param_sensitivity inner loop lines 1221-1223 uses logger.debug. With default INFO level, all trial failures are silent. When all trials fail the function returns None and Gate fails with no diagnostic. _run_cost_sensitivity_bt lines 1136-1153 uses logger.warning without exc_info=True, losing the stack trace.",
+      "evidence": [
+        "atlas/backtest/event_simulator.py:1221-1223",
+        "atlas/backtest/event_simulator.py:1136-1137",
+        "atlas/backtest/event_simulator.py:1150-1153"
+      ],
+      "suggested_fix": "Line 1222: raise to logger.warning with exc_info=True. Lines 1137 and 1152: add exc_info=True."
+    },
+    {
+      "id": "CS-006",
+      "severity": "high",
+      "area": "common/models",
+      "title": "TradeSignal and StrategyConfig lack extra=forbid; extra fields from generated code silently accepted",
+      "description": "atlas/common/models.py: TradeSignal line 62, StrategyConfig line 84, and FillEvent line 123 use Pydantic v2 default extra=ignore. Generated strategy code is untrusted. A generate_signal() returning TradeSignal with extra fields validates without error. CLAUDE.md mandates thorough Pydantic I/O validation.",
+      "evidence": [
+        "atlas/common/models.py:62",
+        "atlas/common/models.py:84",
+        "atlas/common/models.py:123"
+      ],
+      "suggested_fix": "Add model_config = ConfigDict(extra=\"forbid\") to TradeSignal and StrategyConfig. FillEvent may use extra=\"ignore\" for dict compatibility."
+    },
+    {
+      "id": "CS-007",
+      "severity": "high",
+      "area": "backtest/event_simulator",
+      "title": "equity[0]<=0 fallback (total_return_pct=0.0) can make Gate #13 B&H excess return incorrectly PASS",
+      "description": "_compute_metrics lines 831-840: when equity[0]<=0, total_return_pct=0.0 is set with a warning. bh_excess_return_pct (lines 875-881) then computes: 0.0 - bh_return_pct * exposure. In a bear-market period where bh_return_pct is negative (e.g. -10%, exposure=0.3), result is +3.0, passing Gate #13 (>= 0.0). A corrupted BT thus falsely generates apparent alpha.",
+      "evidence": [
+        "atlas/backtest/event_simulator.py:831-840",
+        "atlas/backtest/event_simulator.py:875-881",
+        "atlas/backtest/runner.py:443-448"
+      ],
+      "suggested_fix": "When equity[0]<=0, set total_return_pct=None and bh_excess_return_pct=None. The _check() helper returns False for None, Gate #13 correctly fails."
+    }
+  ]
+}

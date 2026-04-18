@@ -1,0 +1,164 @@
+{
+  "agent": "devops-monitor",
+  "round": 2,
+  "findings": [
+    {
+      "id": "DO-001",
+      "carryover_from_round_1": true,
+      "severity": "high",
+      "area": "monitoring/healthcheck",
+      "title": "StrategyWorker / ExecutionCoordinator / PositionReconciler が HealthChecker の prober に未登録（Round 2 再確認: 未修正）",
+      "description": "Round 1 指摘後も _build_probers() にはインフラ層（redis/postgres/oanda/event_bus）の prober しか登録されていない。StrategyWorker は health プロパティ（healthy/degraded/idle/stopped）を実装済みだが、HealthChecker には一切接続されていない。Worker が asyncio タスク例外でサイレントクラッシュしても check_all() は 'healthy' を返し続ける。OANDAStreamReceiver も is_streaming / last_tick_time 相当プロパティが未実装で prober 登録もない。",
+      "evidence": [
+        "trading_platform/main.py:403-480 — _build_probers() に worker/stream_receiver/coordinator の prober 登録なし（Round 1 と同一コード）",
+        "trading_platform/core/strategy_engine/worker.py:124-144 — health プロパティは実装済みだが HealthChecker に接続されていない",
+        "trading_platform/data/market_data/stream_receiver.py — is_streaming / last_tick_time プロパティ未実装"
+      ],
+      "suggested_fix": "_build_probers() にループを追加し、各 StrategyWorker の health プロパティ（'healthy'/'idle' → True、'degraded'/'stopped' → False）を prober として register_prober() する。OANDAStreamReceiver に最終 tick 受信時刻ベースの is_streaming プロパティを追加し、同様に prober 登録する。"
+    },
+    {
+      "id": "DO-002",
+      "carryover_from_round_1": true,
+      "severity": "high",
+      "area": "monitoring/healthcheck",
+      "title": "OANDA ストリーム生死が HealthChecker に反映されない（Round 2 再確認: 未修正）",
+      "description": "oanda_prober は REST GET /v3/accounts/{id} のみを確認する。OANDA Streaming 接続（WebSocket/HTTP chunked）が切断されても REST エンドポイントが正常なら True を返し続ける。OANDAStreamReceiver が内部で再接続ループを回している間も HealthChecker は oanda=healthy と誤認する。Round 1 以降、OANDAStreamReceiver への健全性プロパティ追加は行われていない。",
+      "evidence": [
+        "trading_platform/main.py:459-476 — oanda_prober: REST GET のみ、stream_receiver の参照なし",
+        "trading_platform/data/market_data/stream_receiver.py — last_tick_received_at や is_connected プロパティ未実装"
+      ],
+      "suggested_fix": "OANDAStreamReceiver に _last_tick_at: datetime | None を追加し、is_streaming プロパティ（last_tick_at からの経過秒 < 閾値）を実装する。oanda_prober を複合チェック（REST AND is_streaming）に変更する。"
+    },
+    {
+      "id": "DO-003",
+      "carryover_from_round_1": true,
+      "severity": "high",
+      "area": "metrics/export",
+      "title": "fx_open_positions ゲージを更新するメソッドが存在しない（Round 2 再確認: 未修正）",
+      "description": "MetricsCollector に fx_open_positions Gauge は登録されているが、set_open_positions() または相当のメソッドが依然として存在しない。Gauge は初期値 0 のまま永久に更新されない。FillProcessor やコーディネータの fill 完了コールバックで呼び出す先がない。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:99-103 — fx_open_positions Gauge 定義（変更なし）",
+        "trading_platform/core/monitoring/metrics.py:258-565 — set_open_positions() メソッド定義なし（Round 1 と同一）",
+        "codebase全体: _gauges['positions'] への書き込み 0 件"
+      ],
+      "suggested_fix": "MetricsCollector に set_open_positions(instrument: str, count: float) を追加し、ExecutionCoordinator の _on_fill 完了後または FillProcessor のポジション更新後に呼び出す。"
+    },
+    {
+      "id": "DO-005",
+      "carryover_from_round_1": true,
+      "severity": "high",
+      "area": "alerting/thresholds",
+      "title": "fx_feature_staleness_sec に対応する Prometheus アラートルールが存在しない（Round 2 再確認: 未修正）",
+      "description": "deploy/prometheus/alerting_rules.yml の全96行を再確認したが、feature_staleness / FxFeatureStale に対応するアラートルールは追加されていない。LiveFeatureStore の特徴量が陳腐化しても（Tick 停止・BarBuilder 停滞等）自動通知されない状態が継続している。",
+      "evidence": [
+        "deploy/prometheus/alerting_rules.yml — feature_staleness 関連ルールなし（Round 1 と同一内容）",
+        "trading_platform/core/monitoring/metrics.py:234-238 — fx_feature_staleness_sec Gauge 定義・実装済み"
+      ],
+      "suggested_fix": "alerting_rules.yml に FxFeatureStale アラートを追加する（例: fx_feature_staleness_sec > 120 for 1m, severity=critical）。"
+    },
+    {
+      "id": "DO-006",
+      "carryover_from_round_1": true,
+      "severity": "high",
+      "area": "alerting/thresholds",
+      "title": "PositionReconciler に MetricsCollector が未注入でミスマッチが Prometheus に到達しない（Round 2 再確認: 未修正）",
+      "description": "position_reconciler.py に MetricsCollector の参照・注入コードが依然として存在しない。不整合検知時に RiskAlertEvent は発行されるが、その RiskAlertEvent 自体にも production code で subscriber がいない（後述 DO-R2-002 参照）。Prometheus での自動検知は不可能なまま。",
+      "evidence": [
+        "trading_platform/core/execution_engine/position_reconciler.py — MetricsCollector 参照・set_metrics_collector() 呼び出し 0 件",
+        "deploy/prometheus/alerting_rules.yml — FxPositionMismatch アラートルールなし",
+        "docs/runbook/position_mismatch.md:19 — 依然として「実装済みの場合」という条件付き記述"
+      ],
+      "suggested_fix": "PositionReconciler に MetricsCollector を注入し、_check_discrepancies() で不整合発見時に inc_reconciler_mismatch(instrument) を呼ぶ。alerting_rules.yml に FxPositionMismatch アラートを追加する。"
+    },
+    {
+      "id": "DO-R2-001",
+      "carryover_from_round_1": false,
+      "severity": "high",
+      "area": "monitoring/alerting",
+      "title": "RiskAlertEvent に production code で subscriber が存在しない（アラートが完全にサイレント）",
+      "description": "KillSwitch._activate()・CircuitBreaker._trip()・HealthChecker._publish_oanda_outage_alert()・PositionReconciler はいずれも RiskAlertEvent を Event Bus に publish するが、production コードのいずれのモジュールも EventType.RISK_ALERT を subscribe() していない。redis_adapter のデシリアライズマップに RiskAlertEvent が登録されているだけで、handler が存在しない。Kill Switch・Circuit Breaker 発動はログと Prometheus カウンタにのみ記録されるが、オペレータへのリアルタイム通知経路（Slack/メール/PagerDuty）は一切存在しない（Phase 1 対応と記載されているが、ログ出力すらアラートとして機能していない）。",
+      "evidence": [
+        "trading_platform/core/risk_engine/circuit_breaker.py:125-137 — RiskAlertEvent publish のみ、subscriber なし",
+        "trading_platform/core/monitoring/health_check.py:368-390 — _publish_oanda_outage_alert() publish のみ",
+        "codebase全体: subscribe(EventType.RISK_ALERT) 呼び出し 0 件（grep 確認済み）",
+        "trading_platform/main.py — RiskAlertEvent handler を登録する箇所なし"
+      ],
+      "suggested_fix": "AlertingHandler を新設し、RiskAlertEvent を subscribe して level に応じてログ出力（CRITICAL → logger.critical, EMERGENCY → logger.critical + 外部通知準備）する。main.py の lifespan で subscribe を実行する。Phase 2 の Slack/メール連携前でも最低限 logger.critical でオペレータに伝える構造を作る。"
+    },
+    {
+      "id": "DO-R2-002",
+      "carryover_from_round_1": false,
+      "severity": "high",
+      "area": "monitoring/state_recovery",
+      "title": "state_recovery 失敗時のアラート経路が存在しない",
+      "description": "main.py の _recover_state_fail_closed() は StateStore 復元失敗時に logger.critical でログを吐いて RuntimeError を raise するが、そのアラート（RiskAlertEvent）を Event Bus に publish しない。さらに Event Bus 自体が start() より前の段階（_recover_state_fail_closed は start() 内の早期フェーズで呼ばれる）で復元が失敗した場合、RiskAlertEvent を publish できない構造上の制約もある。結果として状態復元失敗はログのみに記録され、Prometheus メトリクスへの反映もない。PLATFORM_SKIP_STATE_RECOVERY=1 でスキップした際の loud WARN は適切だが、参照先の runbook が存在しないため対応手順が不明。",
+      "evidence": [
+        "trading_platform/main.py:648-690 — _recover_state_fail_closed(): logger.critical / raise のみ、RiskAlertEvent publish なし",
+        "trading_platform/main.py:659-668 — WARN ログが 'docs/runbooks/state_recovery_skip.md' を参照するが当該ファイル未存在",
+        "deploy/prometheus/alerting_rules.yml — state_recovery に関するアラートルールなし"
+      ],
+      "suggested_fix": "MetricsCollector に inc_state_recovery_failure() を追加し、復元失敗時にカウントする。alerting_rules.yml に FxStateRecoveryFailed アラートを追加する。また docs/runbooks/state_recovery_skip.md を作成する（missing_runbooks に記載）。"
+    },
+    {
+      "id": "DO-R2-003",
+      "carryover_from_round_1": false,
+      "severity": "high",
+      "area": "monitoring/snapshot_writer",
+      "title": "SnapshotWriter 失敗回数が Prometheus に到達しない（PA-003 fix の監視観点残課題）",
+      "description": "PA-003 fix で SnapshotWriter は production に配線されたが、write_or_raise() が SnapshotPersistenceError を上げた際の failure_count インクリメントはインスタンス内部変数にとどまる。MetricsCollector に対応するカウンタ（fx_snapshot_persist_failure_total 相当）が存在せず、Prometheus でのアラートも未定義。スナップショット書き込みが連続失敗して fail-closed により注文が大量 REJECT されても自動通知経路がない。",
+      "evidence": [
+        "trading_platform/data/trade_context/snapshot_writer.py:40-41,82-93 — failure_count / persisted_count はインスタンス変数のみ",
+        "trading_platform/core/monitoring/metrics.py — fx_snapshot_persist_failure 相当のメトリクス定義なし",
+        "trading_platform/core/execution_engine/coordinator.py:304-310 — snapshot write 失敗時は SnapshotPersistenceError を上げるが MetricsCollector 呼び出しなし",
+        "deploy/prometheus/alerting_rules.yml — snapshot 関連アラートルールなし"
+      ],
+      "suggested_fix": "MetricsCollector に inc_snapshot_persist_failure(instrument: str) を追加し、coordinator の except SnapshotPersistenceError ブロックで呼び出す。alerting_rules.yml に FxSnapshotPersistFailed アラートを追加する（threshold: rate > 0 for 1m）。"
+    },
+    {
+      "id": "DO-R2-004",
+      "carryover_from_round_1": false,
+      "severity": "high",
+      "area": "metrics/naming",
+      "title": "Prometheus Counter の命名に _total suffix の有無が不統一",
+      "description": "MetricsCollector の Counter 定義で、一部メトリクスは name に _total を含み（fx_kill_switch_triggered_total, fx_circuit_breaker_triggered_total 等）、一部は含まない（fx_slippage_missing, fx_data_quality_reject, fx_data_quality_warn, fx_backfill_bars, fx_backfill_failures, fx_bars_rejected）。prometheus_client 0.21 は名前に関係なく Counter の exposition 名に _total を付与するため実際の metric 名は正しく生成されるが、alerting_rules.yml の一部ルールは fx_data_quality_reject_total と正式名称で参照しており、コードと乖離した記述が混在している。この不統一はコードレビューや Runbook 執筆時の混乱を招き、アラートルール追加時に命名ミスを誘発する。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:155,161,167,174,181,188 — Counter name に _total 含む",
+        "trading_platform/core/monitoring/metrics.py:195,206,211,218,223,241 — Counter name に _total 含まない（コメントで意図明記）",
+        "trading_platform/core/monitoring/metrics.py:195 — コメント: 'prometheus_client が _total suffix を自動付与するため name に含めない' ← ただし他は含めている"
+      ],
+      "suggested_fix": "Counter 登録名の方針を統一する。推奨: name に _total を含めない（prometheus_client の自動付与に任せる）。既存の fx_kill_switch_triggered_total 等を fx_kill_switch_triggered に改名するか、逆に _total なし側を _total あり統一とする。alerting_rules.yml と合わせて一括変更する。"
+    },
+    {
+      "id": "DO-R2-005",
+      "carryover_from_round_1": false,
+      "severity": "high",
+      "area": "dashboard/security",
+      "title": "Streamlit ダッシュボードに認証機構がない（本番デプロイ時のリスク）",
+      "description": "dashboard/app.py には認証コードが一切存在しない。FastAPI バックエンド（/risk/kill-switch/reset エンドポイント等）を経由した危険な操作はダッシュボードからは行えないが、ダッシュボード自体（口座状況・ポジション・PnL 等の機密情報）が認証なしで誰でも閲覧できる。WSL2 環境で localhost のみに開放している場合は問題ないが、Docker / リバースプロキシ経由での公開時にアクセス制御がない状態になる。FastAPI 側の /risk/ エンドポイント群も認証ミドルウェアが未実装。",
+      "evidence": [
+        "trading_platform/dashboard/app.py:1-184 — auth / st.secrets / login 関連コード 0 行",
+        "trading_platform/main.py:886-901 — /risk/circuit-breaker/reset, /risk/kill-switch/reset に認証なし",
+        "trading_platform/main.py:826 — FastAPI app に認証ミドルウェア未追加"
+      ],
+      "suggested_fix": "Phase 1 最低限: Streamlit の st.secrets でパスワード保護（st.text_input + session_state でゲート）を実装する。FastAPI 側 /risk/ エンドポイントに Bearer トークン認証（python-jose + OAuth2PasswordBearer）を追加する。または Nginx の Basic Auth でリバースプロキシレベルで保護する。"
+    }
+  ],
+  "missing_runbooks": [
+    {
+      "path": "docs/runbooks/state_recovery_skip.md",
+      "reason": "trading_platform/main.py の _recover_state_fail_closed() が PLATFORM_SKIP_STATE_RECOVERY=1 使用時と復元失敗時の両方で当該パスを参照している（main.py:662,687）が、ファイルが存在しない。Redis 停止・StateStore データ破損時にオペレータが安全に degraded mode 起動する手順（KS/daily_pnl のリセット確認、手動 /risk/kill-switch 操作）が明文化されていない。"
+    },
+    {
+      "path": "docs/runbook/snapshot_writer_failure.md",
+      "reason": "SnapshotWriter の fail-closed 設計により、snapshot 書き込みに連続失敗すると全注文が REJECT され取引が停止する。この事態の検知方法・fsync エラーの原因（ディスクフル・権限問題）の診断手順・応急処置（snapshot_required=False への一時変更）・エスカレーション手順が未定義。"
+    },
+    {
+      "path": "docs/runbook/kill_switch_level_guide.md",
+      "reason": "既存の kill_switch_triggered.md はシングルレベルの対応手順のみ記述。日次損失率のレベル別エスカレーション（5% 未満: 様子見、5-10%: 警戒、10-15%: KS 近接、15% 超: KS 発動）の判断基準と対応フローが未定義。特に RE-001 の状態復元で kill_switch_active=True が復元された場合（プロセス再起動後の継続 KS 状態）の対応手順が欠落している。"
+    },
+    {
+      "path": "docs/runbook/risk_alert_nosubscriber.md",
+      "reason": "現在 RiskAlertEvent はどこにも consume されない（DO-R2-001）。この設計制約を運用ドキュメント化し、アラート監視の代替手段（Prometheus の alerting_rules.yml 経由のみ有効、ログ監視での補完方法）を明記する暫定 Runbook が必要。"
+    }
+  ]
+}

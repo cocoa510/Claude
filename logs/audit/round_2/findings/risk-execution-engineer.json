@@ -1,0 +1,148 @@
+{
+  "agent": "risk-execution-engineer",
+  "round": 2,
+  "mode": "devil_advocate_self_verification",
+  "findings": [
+    {
+      "id": "RE-003",
+      "severity": "high",
+      "area": "risk_engine/ptrc",
+      "carryover_from_round_1": true,
+      "title": "PTRC に spread check が未実装のまま（Round 1 未修正）",
+      "description": "Round 1 で指摘した SHARED_CONTRACT §12.2/§12.4 要件の spread gate は依然として PTRC.evaluate() に未組込。 ptrc.py:123-141 の 7 gate 配列に spread check は無く、PTRCCheckType にも SPREAD_GUARD 列挙値が追加されていない。tick_snapshot 参照経路も未配線。NY クローズ跨ぎ / 高 impact ニュース直後の spread 急拡大エントリーを構造的に止められない状態が継続。",
+      "evidence": [
+        "trading_platform/core/risk_engine/ptrc.py:123-141 (evaluate() 7 gates 内に spread check なし)",
+        "trading_platform/core/models/risk.py:21-30 (PTRCCheckType: SPREAD_GUARD 未定義)"
+      ],
+      "suggested_fix": "Round 1 fix 提案と同一: PTRCCheckType.SPREAD_GUARD 追加 + _check_spread(order, tick_snapshot) 実装 + Settings.max_spread_pips_by_instrument 導入。最低限 observe モード（ログ+メトリクス）から段階的に block へ。"
+    },
+    {
+      "id": "RE-004",
+      "severity": "high",
+      "area": "risk_engine/kill_switch",
+      "carryover_from_round_1": true,
+      "title": "Kill Switch は依然としてオープン建玉を close しない（Round 1 未修正）",
+      "description": "circuit_breaker.py:288-425 の _activate() は retry_manager.stop_all / broker.halt / drain_queue / pre-submit cancel / broker cancel の 5 段階のみで、get_open_trades→close_trade 経路が追加されていない。KS 発動後もオープン・ポジションはブローカー側で損益変動を続け、15% 閾値超過時点の drawdown 固定化ができない。加えて health_check._publish_oanda_outage_alert は RiskAlertEvent(CRITICAL, oanda_connection_lost) を発行するだけで、KillSwitch 側にも alert 購読→KS 発動の配線が無く、OANDA 疎通途絶→自動 KS チェーンが未実装のまま。",
+      "evidence": [
+        "trading_platform/core/risk_engine/circuit_breaker.py:288-425 (_activate() に close_trade 呼出なし)",
+        "trading_platform/core/risk_engine/circuit_breaker.py:220-241 (KillSwitch.start: FILL 以外購読なし)",
+        "trading_platform/core/monitoring/health_check.py:368-390 (_publish_oanda_outage_alert は alert 発行のみ)",
+        "trading_platform/core/execution_engine/broker_gateway.py:302-314 (close_trade 実装済だが KS 経路未使用)"
+      ],
+      "suggested_fix": "Round 1 fix 提案と同一: (A) KillSwitch._activate 末尾に broker_gateway.get_open_trades→close_trade ループ追加（失敗は CRITICAL ログ + reconciler 委譲）。(B) KillSwitch.start で RiskAlertEvent 購読を追加し alert_type='oanda_connection_lost' 受領時に evaluate_and_activate(reason='oanda_connection_lost') を呼ぶ。"
+    },
+    {
+      "id": "RE-005",
+      "severity": "high",
+      "area": "execution_engine/state_persistence",
+      "carryover_from_round_1": true,
+      "title": "_persist_order / _persist_position / _persist_risk_state が silent swallow のまま（Round 1 未修正）",
+      "description": "coordinator.py:652-675 の 3 関数は全て try/except 握り潰し + logger.error のみ。RE-001 修正で _persist_risk_state が増えたが、これも同じ silent swallow パターン。Redis 接続断・シリアライズ失敗時に broker 送信は成功しているのに state_store 側は古い値のまま継続する死角は残存。Prometheus counter / RiskAlertEvent / HealthChecker 配線のいずれも未実装。RE-001 で復元経路は出来たが書込み側が依然 fire-and-forget のため、復元された状態が最新とは限らない（RE-001 と RE-005 は相補的死角）。",
+      "evidence": [
+        "trading_platform/core/execution_engine/coordinator.py:643-650 (_persist_risk_state silent swallow)",
+        "trading_platform/core/execution_engine/coordinator.py:652-661 (_persist_order silent swallow)",
+        "trading_platform/core/execution_engine/coordinator.py:663-675 (_persist_position silent swallow)"
+      ],
+      "suggested_fix": "3 関数共通で (1) 失敗時に MetricsCollector.inc('fx_state_persist_failures_total', labels={type}) (2) N 回連続失敗（例: 3）で RiskAlertEvent(CRITICAL, alert_type='state_persist_failed') を一度発行 (3) HealthChecker.update('state_store', healthy=False, critical=True) を呼ぶ。理想的には fail-closed（持続失敗で新規注文を受付停止）への切替。"
+    },
+    {
+      "id": "RE-007",
+      "severity": "high",
+      "area": "risk_engine/ptrc/fat_finger",
+      "carryover_from_round_1": true,
+      "title": "Fat Finger は units 閾値のみで notional cap なし（Round 1 未修正）",
+      "description": "ptrc.py:180-198 は依然として HARD_LIMITS.max_order_quantity=1_000_000 / min_order_quantity=100 の units 閾値だけで判定し、notional（口座通貨建て絶対額）での上限が存在しない。HARD_LIMITS に max_order_notional_jpy 等の追加フィールドも無い。USD_JPY 1M=150M JPY / GBP_USD 1M=190M JPY の 27% 差が残存し、クロス通貨ペアでの桁誤入力リスクが不均一のまま。RE-008 で _resolve_reference_price + currency_converter が整備されたため、notional cap の実装コストは Round 1 提示時より低下している（再利用可能）。",
+      "evidence": [
+        "trading_platform/core/risk_engine/ptrc.py:180-198 (_check_fat_finger: quantity 比較のみ)",
+        "trading_platform/core/models/risk.py:170-206 (HARD_LIMITS に max_order_notional_* 未定義)"
+      ],
+      "suggested_fix": "Round 1 fix 提案と同一。追加で RE-008 修正で導入済みの _resolve_reference_price + CurrencyConverter を流用し、notional = quantity * ref_price → account_currency 換算 → HARD_LIMITS.max_order_notional_in_account と比較。参照価格 or 換算不能時は REJECT（fail-safe、RE-008 の契約と統一）。"
+    },
+    {
+      "id": "RE-R2-010",
+      "severity": "high",
+      "area": "execution_engine/fill_processor",
+      "carryover_from_round_1": false,
+      "title": "FillProcessor._processed_fills が未永続化 — クラッシュ復旧で重複約定処理が発生（RE-001 回帰の隣接死角）",
+      "description": "RE-001 (d99a425) で orders/positions/risk_state/account_risk_state は復元されるようになったが、fill_processor.py:48 の _processed_fills: set[tuple[order_id, broker_fill_id]] は in-memory only で復元対象外。SIGKILL 後の再起動で同一 FillEvent がブローカーまたは event bus から再配信された場合、_processed_fills が空のため冪等性チェックが効かず、_update_position が二重実行される。結果: position.quantity / avg_entry_price が倍算され、coordinator._on_signal の realized_pnl 計算も二重加算、daily_realized_pnl が実損より大きく積まれる。15% Kill Switch 発動が early trigger or over-shoot する。RE-001 の suggested_fix にあった『OANDA 側を Truth として照合する起動フック』が未実装（main.py に get_open_trades による reconciliation 呼出なし）のため、ブローカー側 Truth による矛盾解消経路も欠落。",
+      "evidence": [
+        "trading_platform/core/execution_engine/fill_processor.py:48 (_processed_fills set は永続化対象外)",
+        "trading_platform/core/execution_engine/fill_processor.py:74-92 (冪等性チェックは set membership のみ)",
+        "trading_platform/core/execution_engine/coordinator.py:524-641 (recover_state で _processed_fills 復元なし)",
+        "trading_platform/main.py:550 (_recover_state_fail_closed 後に OANDA Truth 照合なし)"
+      ],
+      "suggested_fix": "(1) StateStore に save_processed_fills / load_processed_fills を追加し、 fill_processor で process_fill 完了時に persist / recover_state で inject。(2) さらに堅牢化: coordinator.recover_state の末尾で broker_gateway.get_open_trades() を呼び、ローカル position との照合→差分が CRITICAL RiskAlertEvent 発行 + 人間判断待ち（自動修正は禁止）。RE-001 の段階 (2)『OANDA 側を Truth として照合する起動フック』を今回完全実装する。"
+    },
+    {
+      "id": "RE-R2-011",
+      "severity": "high",
+      "area": "risk_engine/ptrc_post_action_wiring",
+      "carryover_from_round_1": false,
+      "title": "PTRC-Post Level 1 (size_limit) / Level 2 (entry_stop / strategy_pause / position_reduction) が実行側に未配線 — 警告ログのみ",
+      "description": "ptrc_post.py は 4 レベル 4 種類のアクション（alert / size_limit / entry_stop / strategy_pause / position_reduction / kill_switch）を生成するが、coordinator._run_post_trade_risk (coordinator.py:486-522) は action_type=='kill_switch' のみ KillSwitch.evaluate_and_activate() に接続し、それ以外は `logger.warning` を出すだけで一切強制しない（自身コメント L491『strategy_pause/entry_stop は後続 PR で配線』）。Level 2 entry_stop は daily_loss 残余 10% 以下で発火するのに新規エントリーは止まらず、そのまま 15% KS 閾値まで突入する。仕様上の段階的縮小ポリシー（Level 1 警告 → Level 2 縮小 → Level 3 緊急）は実態として 2 段階（無制限 → KS）に退化している。この欠落はユーザータスクが列挙した『Kill Switch の Level 1/2/3 段階実装漏れ』と直接一致。",
+      "evidence": [
+        "trading_platform/core/execution_engine/coordinator.py:486-522 (kill_switch action のみ配線)",
+        "trading_platform/core/risk_engine/ptrc_post.py:108-143 (entry_stop/size_limit 生成箇所)",
+        "trading_platform/core/risk_engine/ptrc_post.py:84-91 (strategy_pause 生成箇所)"
+      ],
+      "suggested_fix": "(1) ExecutionCoordinator に entry_stop_mode: bool = False と strategies_paused: set[str] を追加。action_type=='entry_stop' 受領で entry_stop_mode=True / _on_signal 冒頭で entry_stop_mode かつ signal.direction != FLAT の場合は REJECT（FLAT 決済は通す）。(2) action_type=='strategy_pause' で strategies_paused.add(strategy_id) し、同 strategy_id の非 FLAT signal は REJECT。(3) action_type=='size_limit' で signal.position_size_ratio *= 0.5 を OrderManager.create_order_from_signal 引数で受けるか、coordinator 経由で ratio 再計算。解除は日次リセットまたは manual API。"
+    },
+    {
+      "id": "RE-R2-012",
+      "severity": "high",
+      "area": "risk_engine/ptrc_post_level3_gap",
+      "carryover_from_round_1": false,
+      "title": "PTRC-Post Level 3 kill_switch 発火閾値（10%）と KillSwitch.check 発動閾値（15%）が齟齬 — 連鎖発動が機能しない",
+      "description": "ptrc_post.py:168-170 は `remaining_ratio <= 0.0` （＝ daily_loss が max_daily_loss=10% 以上）で action_type='kill_switch' を発行するが、coordinator._run_post_trade_risk からこのアクションを受け取って呼ぶ `KillSwitch.evaluate_and_activate()` は内部で `check()` → `loss_ratio >= kill_switch_daily_loss=15%` を要求するため、10%-15% の帯域では Level 3 action が発火しても KS は発動しない（RE-002 修正で 1 fill 遅延は解消したが、閾値齟齬はそれ以前の設計問題）。結果: PTRC-Post が『Level 3 緊急 — Kill Switch 発動推奨』とログ出力するのに Kill Switch は黙って発動を拒否し、daily_loss が 15% に到達するまで entry 継続。user task『Kill Switch の Level 1/2/3 段階実装漏れ』の実態がこの閾値齟齬。",
+      "evidence": [
+        "trading_platform/core/risk_engine/ptrc_post.py:167-182 (Level 3: remaining_ratio <= 0.0 で kill_switch action)",
+        "trading_platform/core/risk_engine/ptrc_post.py:32 (DAILY_LOSS_WARNING_REMAINING: 残余 30% → max_daily_loss=10% の 70% 到達 = 7% 損失で warning)",
+        "trading_platform/core/risk_engine/circuit_breaker.py:262-270 (KillSwitch.check は kill_switch_daily_loss=15% 固定)",
+        "trading_platform/core/models/risk.py:184,199 (max_daily_loss=0.10 / kill_switch_daily_loss=0.15)"
+      ],
+      "suggested_fix": "(A) KillSwitch に force_activate(reason: str) を追加し、PTRC-Post 由来の Level 3 action は check() をスキップして強制発動させる（remaining_ratio<=0 は既に max_daily_loss 超過の事象であり十分緊急）。または (B) PTRC-Post Level 3 条件を remaining_ratio <= -0.5 相当（= 10% + 5% = 15%）に緩めて KS の 15% 閾値と揃える。(A) が望ましい（10% の絶対 Hard Limit 突破 = 即 KS が仕様として一貫）。"
+    },
+    {
+      "id": "RE-R2-013",
+      "severity": "high",
+      "area": "execution_engine/portfolio_snapshot/margin_fx",
+      "carryover_from_round_1": false,
+      "title": "_build_portfolio_snapshot の used_margin が通貨換算ゼロ — 非 JPY 建ポジションが JPY 建口座で桁違いに過小評価",
+      "description": "coordinator.py:688-695 の used_margin は `abs(vp.quantity) * vp.avg_entry_price * 0.04` で計算するが、これは quote 通貨建ての金額。account_balance は JPY 建て（DEFAULT_ACCOUNT_CURRENCY='JPY'）なので、EUR_USD 100000 units @ 1.1 は `100000 * 1.1 * 0.04 = 4,400 USD` が `used_margin=4400 JPY` 扱いで account_equity から引かれる（実際は 4400 USD ≒ 660,000 JPY 必要）。結果: available_margin が 150 倍過大評価され、PTRC._check_margin は使用可能証拠金十分と誤判定して EUR_USD / GBP_USD の新規エントリーが通ってしまう。加えて 0.04 ハードコードも PreTradeRiskControl._leverage (Settings 由来) と二重化しており、Settings 変更時に齟齬が生じる。RE-008 で PTRC 側は CurrencyConverter + leverage 統一済みだが、その入力となる PortfolioSnapshot.available_margin が bogus なので修正が無効化されている（RE-008 回帰ではないが連動する死角）。",
+      "evidence": [
+        "trading_platform/core/execution_engine/coordinator.py:688-698 (used_margin 計算に CurrencyConverter 不使用)",
+        "trading_platform/core/execution_engine/coordinator.py:695 (0.04 ハードコード、Settings.default_leverage と二重定義)",
+        "trading_platform/core/risk_engine/ptrc.py:507-535 (PTRC._check_margin は available_margin をそのまま信頼)"
+      ],
+      "suggested_fix": "_build_portfolio_snapshot を PreTradeRiskControl と同じ CurrencyConverter + leverage を共有する形にリファクタ。 (1) ExecutionCoordinator.__init__ に currency_converter と leverage を注入（PTRC と同一インスタンス）。(2) used_margin 計算時に quote_ccy = parse_quote_currency(vp.instrument) → currency_converter.convert(qty*price/leverage, quote_ccy, account_currency)。換算失敗時は当該ポジションを used_margin=notional_in_quote として保守的に計上（fail-safe で margin を大きく見積もる）。"
+    },
+    {
+      "id": "RE-R2-014",
+      "severity": "high",
+      "area": "execution_engine/broker_gateway",
+      "carryover_from_round_1": true,
+      "title": "BrokerGateway._attempts の dict leak が未修正（RE-009 相当、Round 1 HIGH）",
+      "description": "broker_gateway.py:115 の self._attempts: dict[str, int] は order_id ごとに submit 試行回数を記録するが、現在も terminal 遷移時の cleanup フックが未実装。OrderManager._cleanup_terminal_orders は _orders のみ対象で _attempts には触れない。長期稼働で数十万 order_id を保持し続けるスローリークが継続。Round 1 で HIGH と判定したが修正対象から漏れた可能性が高い（de75c08/35612c5/d99a425 の diff 内に broker_gateway.py は含まれず）。",
+      "evidence": [
+        "trading_platform/core/execution_engine/broker_gateway.py:115 (self._attempts: dict[str, int] = {})",
+        "trading_platform/core/execution_engine/broker_gateway.py:117-119 (_next_attempt は increment のみ、cleanup 未実装)",
+        "trading_platform/core/execution_engine/order_manager.py:76-100 (_cleanup_terminal_orders は _attempts を触らない)"
+      ],
+      "suggested_fix": "OrderManager.transition_order の terminal 遷移時に broker_gateway.on_order_terminal(order_id) コールバックを呼ぶ。または BrokerGateway に register_order_manager を追加し、submit 応答後 FILLED/FAILED/REJECTED/CANCELLED を検知したら _attempts.pop する。最低でも _cleanup_terminal_orders と同じ間隔で _attempts のキーと _orders のキーを比較し、orphan を削除する周期 GC を追加。"
+    },
+    {
+      "id": "RE-R2-015",
+      "severity": "high",
+      "area": "execution_engine/idempotency_signal_level",
+      "carryover_from_round_1": false,
+      "title": "SignalEvent レベルの dedup が不在 — 同一 correlation_id 再配信で二重発注が発生しうる",
+      "description": "ExecutionCoordinator._on_signal は冪等性キーとして何も管理しておらず、同一 SignalEvent が Redis PubSub の再配信（supervisor pattern 再接続時）や UnifiedRunner の retry 経路で再到達すると、OrderManager._generate_client_order_id が `{strategy_id}-{signal_id}-{timestamp_ms}-{sequence}` を生成する際に timestamp_ms と sequence が異なるため別の order_id となり、同一シグナルから 2 本の order が broker に送信される。StateStore._KEY_LAST_EVENT API は存在するが coordinator からの参照ゼロ。RE-001 で state_store 連携は整備されたが signal-level dedup は死角のまま残存。crash recovery 時の event bus redelivery と組み合わさると RE-R2-010 と連鎖し deterministic に二重発注する。",
+      "evidence": [
+        "trading_platform/core/execution_engine/coordinator.py:184-208 (_on_signal 冒頭に dedup チェックなし)",
+        "trading_platform/core/execution_engine/order_manager.py:62-74 (_generate_client_order_id は毎回新 ID)",
+        "trading_platform/data/state_store/redis_store.py:275-281 (save/load_last_event_id API 実装のみ、呼出ゼロ)"
+      ],
+      "suggested_fix": "(1) ExecutionCoordinator に self._seen_signal_ids: collections.OrderedDict[str, None] = OrderedDict() を追加（LRU 1024 件）。_on_signal 冒頭で signal_event.correlation_id をキーに重複チェック、seen なら WARN ログして return。(2) StateStore.save_last_event_id を signal 処理完了時に呼び、recover_state 時に load して in-memory set に復元。(3) OrderManager 側で二重防衛: create_order_from_signal に idempotency_key 引数を追加し、_orders に既存の (strategy_id, signal_id) 組があれば既存 Order を返す。"
+    }
+  ]
+}

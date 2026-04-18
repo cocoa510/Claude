@@ -1,0 +1,411 @@
+{
+  "reviewer": "devil-advocate",
+  "round": 1,
+  "total_findings": 50,
+  "validated_count": 48,
+  "rejected_count": 2,
+  "downgraded_count": 11,
+  "upgrades": [],
+  "results": [
+    {
+      "id": "CS-001",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "sandbox_builtins.py:29 has raw __import__. Stage 1 AST checks literal __import__; f=__import__ aliasing evades detection. All FORBIDDEN_MODULES reachable. Concrete repro: alias passes Stage 1 executes forbidden module in Stage 3.",
+      "reviewer_note": "Valid HIGH. Filtered wrapper is the correct fix."
+    },
+    {
+      "id": "CS-002",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Plausible given ATLAS 87+ generation history. _SandboxWorker._mem_poll lines 103-122 compares absolute process RSS vs 512MB with no baseline. If RSS exceeds 512MB every subsequent strategy is rejected. __init__ does not record baseline_rss.",
+      "reviewer_note": "Valid HIGH. Particularly relevant given ATLAS long loop runs."
+    },
+    {
+      "id": "CS-003",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at sandbox_runner.py:402-407: threshold is absolute count>=5. TypeError and AttributeError not treated as immediate failures. 4/200 bars crashing with TypeError passes Stage 3 with only WARNING.",
+      "reviewer_note": "Valid HIGH. TypeError/AttributeError indicate logic bugs; should trigger immediate FAIL."
+    },
+    {
+      "id": "CS-004",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at vectorbt_engine.py:362-376: non-ValueError indicator exceptions fill NaN and continue. run_layer1 lines 785-791 do not inspect _feature_compute_errors after _generate_signals_vectorized. Strategy on NaN features may pass L1 silently.",
+      "reviewer_note": "Valid HIGH. Single guard line after _generate_signals_vectorized."
+    },
+    {
+      "id": "CS-005",
+      "original_severity": "high",
+      "adjusted_severity": "low",
+      "validated": true,
+      "rationale": "Premise correct -- DEBUG-level logging and missing exc_info=True. However when all trials fail function returns None and Gate correctly fails. No Gate pass/fail logic depends on these log lines. Pure diagnostic issue.",
+      "reviewer_note": "Downgraded. Logging quality issue only."
+    },
+    {
+      "id": "CS-006",
+      "original_severity": "high",
+      "adjusted_severity": "low",
+      "validated": true,
+      "rationale": "Factually correct -- extra=ignore is default. Extra fields are dropped not acted upon. No downstream logic consumes dropped extra fields. CLAUDE.md mandate is hygiene. No concrete safety gap.",
+      "reviewer_note": "Downgraded. Hygiene issue."
+    },
+    {
+      "id": "CS-007",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at event_simulator.py:831-840: equity[0]<=0 sets total_return_pct=0.0 (CSR-R5-001 at line 830). At lines 875-881: bh_excess = 0.0 - bh_return_pct * exposure. Bear-market period gives bh_excess positive and passes Gate 13. Warning logged but value not set to None. Concrete repro: corrupted initial balance in declining market generates false alpha.",
+      "reviewer_note": "Valid HIGH. Existing warning is incomplete."
+    },
+    {
+      "id": "QA-001",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at vectorbt_engine.py:629: pf.sharpe_ratio() called with no year_freq. vectorbt defaults to 365-day year for H1 giving 8760 bars/year vs L2 FX-correct 6240. Systematic 1.184x Sharpe inflation. CLAUDE.md Immutable Gate Protocol includes calculation logic as immutable -- different annualization base is a direct spec violation.",
+      "reviewer_note": "Valid HIGH. ~18% systematic Sharpe inflation affects all H1 strategies."
+    },
+    {
+      "id": "QA-002",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at event_simulator.py:868-881: bh_excess = total_return - bh_return * exposure. Real data (ATLAS-2026-0417-003: exposure=0.1155 bh_excess=227.45%) is mathematically consistent. Gate 13 structural advantage for low-exposure strategies is real. Fallback to exposure=1.0 at line 880 for legacy strategies confirmed.",
+      "reviewer_note": "Valid HIGH. Gate 13 creates structural alpha illusion for low-exposure strategies."
+    },
+    {
+      "id": "QA-003",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at runner.py:834-851: is_duplicate=True results in only logger.warning -- overall_passed NOT set to False. CLAUDE.md line 120 states is_duplicate=True should block Gate PASS. Direct spec-implementation divergence.",
+      "reviewer_note": "Valid HIGH. Cluster cap bypass with FTS auto-import risk is concrete."
+    },
+    {
+      "id": "QA-004",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at metrics.py:26: CWD-relative path. runner.py:43-56 uses ATLAS root absolute path. Running pytest from parent directory causes metrics FileNotFoundError while BT succeeds. Violates reproducibility principle.",
+      "reviewer_note": "Valid HIGH. Path inconsistency breaks reproducibility."
+    },
+    {
+      "id": "QA-005",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at vectorbt_engine.py:618-619: gross_loss=0 returns float(inf). event_simulator.py:745-749 returns None. Inf propagates through round() at line 640. Standard json.dumps raises ValueError on inf. L1 gate evaluates inf > 0.8 as True and all-winning strategies unconditionally pass L1.",
+      "reviewer_note": "Valid HIGH. JSON serialization break and L1/L2 asymmetry are both concrete."
+    },
+    {
+      "id": "PA-001",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed: events.py:91 correlation_id defaults to None. circuit_breaker.py:125/387 and position_reconciler.py:242/252/265 omit correlation_id. coordinator.py:282/310/324 correctly passes order.correlation_id. DataQualityEngine:464 also propagates it. Selective application of known pattern.",
+      "reviewer_note": "Valid HIGH. Audit trail breaks at highest-value events."
+    },
+    {
+      "id": "PA-002",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at settings.py:37: oanda_api_key: str. Zero SecretStr usage in trading_platform. model_dump() or repr(settings) exposes live OANDA token. Structlog file logging at main.py:65-68 creates disk-write path.",
+      "reviewer_note": "Valid HIGH. Easy fix with immediate security benefit."
+    },
+    {
+      "id": "PA-003",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed: coordinator.py:61 snapshot_writer defaults to None. coordinator.py:287 fail-closed gate fires only if not None. main.py:330-342 constructs ExecutionCoordinator without snapshot_writer. Entire fail-closed snapshot gate is dead code in production. FTS CLAUDE.md:130 requirement structurally unmet.",
+      "reviewer_note": "Valid HIGH. Correct architecture missing wiring."
+    },
+    {
+      "id": "PA-004",
+      "original_severity": "high",
+      "adjusted_severity": "low",
+      "validated": true,
+      "rationale": "Factually correct -- BaseEvent uses extra=ignore. However extra=forbid on shared event buses breaks rolling deployments where producers lead consumers on schema updates. Defensible design trade-off. Downgraded to LOW.",
+      "reviewer_note": "Downgraded. Design trade-off overstated as active bug."
+    },
+    {
+      "id": "PA-005",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at memory_adapter.py:84-86: publish returns without invoking handlers if _running=False. stop() sets _running=False before drain completes. Terminal events emitted during shutdown silently dropped. redis_adapter.py:169 has no _running guard -- asymmetry means in-memory tests pass but production Redis behaves differently.",
+      "reviewer_note": "Valid HIGH. Silent terminal event drops corrupt reconciliation state."
+    },
+    {
+      "id": "RE-001",
+      "original_severity": "critical",
+      "adjusted_severity": "critical",
+      "validated": true,
+      "rationale": "Confirmed by codebase grep: load_account_risk_state load_risk_state load_position load_order appear ONLY in redis_store.py definitions -- zero call sites outside test code. main.py:309-310 creates StateStore with no recovery hook before worker start. Concrete repro: trigger kill_switch (Redis saves is_kill_switch_active=True) SIGKILL process restart -- is_kill_switch_active NOT restored daily_pnl resets to 0 orders immediately flow.",
+      "reviewer_note": "CONFIRMED CRITICAL. Most severe finding. Highest priority for Phase 3."
+    },
+    {
+      "id": "RE-002",
+      "original_severity": "critical",
+      "adjusted_severity": "critical",
+      "validated": true,
+      "rationale": "Confirmed at coordinator.py:398-411: _run_post_trade_risk called at line 398 BEFORE daily_realized_pnl incremented at line 410-411. ptrc_post.py:100 reads risk_state.daily_realized_pnl. Current fill pnl absent during evaluation. KS Level 3 (15%) evaluated one fill behind. Concrete repro: daily_pnl=-14.9% single loss fill pushes to -16% -- KS fires on NEXT fill not this one.",
+      "reviewer_note": "CONFIRMED CRITICAL. Fix is trivial: move lines 410-411 before line 398."
+    },
+    {
+      "id": "RE-003",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at ptrc.py:87-144: evaluate() has 7 checks with zero spread gate. SHARED_CONTRACT.md 12.2/12.4 requires spread checking at PTRC level. Existing spread checks are data quality gates not pre-order spread validation. NY close and news event spread spikes not blocked at order submission.",
+      "reviewer_note": "Valid HIGH. Documented requirement gap."
+    },
+    {
+      "id": "RE-004",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at circuit_breaker.py:283-400: _activate() does not call broker_gateway.close_trade() for FILLED open positions. broker_gateway.py:302-314 has close_trade implemented but unused in KS path. Post-KS open positions accumulate loss indefinitely.",
+      "reviewer_note": "Valid HIGH. Post-KS loss accumulation from open positions is real operational risk."
+    },
+    {
+      "id": "RE-005",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at coordinator.py:494-517: _persist_order and _persist_position use bare try/except with only logger.error. No metrics no alerts no health degradation. Redis disconnect produces broker-submitted but state-lost orders. Amplifies RE-001 in crash scenarios.",
+      "reviewer_note": "Valid HIGH. Silent state persistence failure with no operational visibility."
+    },
+    {
+      "id": "RE-006",
+      "original_severity": "high",
+      "adjusted_severity": "low",
+      "validated": true,
+      "rationale": "Finding correctly describes post-trade-only slippage guard and unused OANDA priceBound. However MARKET orders are inherently post-fill -- only pre-trade protection is order type change. This is a design decision not a bug.",
+      "reviewer_note": "Downgraded. Conflates MARKET order design trade-off with a defect."
+    },
+    {
+      "id": "RE-007",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at risk.py:189-193: max_order_quantity=1_000_000 universal constant. ptrc.py:180-198 checks units only. EUR_USD 1M at 1.27 = ~190M JPY vs USD_JPY 1M at 150 = 150M JPY -- 27% notional difference. Fat finger on units alone misses the notional dimension.",
+      "reviewer_note": "Valid HIGH. Notional-based fat finger check is industry standard."
+    },
+    {
+      "id": "RE-008",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at ptrc.py:321-330: ref_price=0.0 default when context_snapshot missing. new_order_notional = quantity * 0.0 = 0. Exposure check passes as if order has zero notional -- fail-open. ptrc.py:457-471 REJECTs on missing price -- fail-safe. Inconsistency confirmed in code.",
+      "reviewer_note": "Valid HIGH. Fail-open exposure vs fail-safe margin is logically inconsistent and dangerous."
+    },
+    {
+      "id": "RE-009",
+      "original_severity": "high",
+      "adjusted_severity": "low",
+      "validated": true,
+      "rationale": "Confirmed: broker_gateway.py:115-119 _attempts dict grows without cleanup. Practical impact negligible at realistic FX retail trading volumes (~1.2MB/year).",
+      "reviewer_note": "Downgraded. Memory growth too slow to matter."
+    },
+    {
+      "id": "DE-001",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed: ATLAS _SimpleFeatureStore (vectorbt_engine.py:253-395) and FTS build_builtin_indicators (indicators.py:17-236) are 17-indicator independent implementations. Stochastic_d divergence is a latent risk. SHARED_CONTRACT acknowledges intentional dual implementation with parity tests as sole sync mechanism. No CI enforcement prevents one-sided updates.",
+      "reviewer_note": "Valid HIGH. Will cause live/BT divergence without CI enforcement."
+    },
+    {
+      "id": "DE-002",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed: grep of live_store.py finds no is_warmed_up method. stream_receiver.py:49 DEFAULT_INITIAL_WARMUP_BARS=300. period=200 EMA with BUFFER_SAFETY_FACTOR=50 requires 10000 bars vs 300 -- 33x deficit. worker.py:292-310 calls generate_signal without warmup guard. SHARED_CONTRACT 12.3 explicitly marks this unresolved.",
+      "reviewer_note": "Valid HIGH. BT/Live divergence from first live bar. SHARED_CONTRACT acknowledges as unresolved."
+    },
+    {
+      "id": "DE-003",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at bar_builder.py:342-348: UTC epoch alignment for D bars. OANDA default NY 17:00 alignment = UTC 21:00/22:00. data_loader.py:163-208 does not specify alignmentTimezone. Default truth_source=tick_aggregation makes misalignment the active path for D-timeframe strategies.",
+      "reviewer_note": "Valid HIGH. D-timeframe strategies have systematic OHLC mismatch between backtest and live."
+    },
+    {
+      "id": "DE-004",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at bar_builder.py:420-426: volume += 1.0 (tick count not transactions). candle_fetcher.py:10-13 explicitly acknowledges H/L divergence (mid vs bid/ask). ATR from mid H/L systematically narrower than ATLAS BT using OANDA candle H/L. ATR drives stop-loss sizing.",
+      "reviewer_note": "Valid HIGH. Stop-loss sizing accuracy directly affected."
+    },
+    {
+      "id": "DE-005",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed: live_store.py:66-74 uses D1 key stream_receiver.py:52-55 uses D key. Timeframe Enum str value is D1. _TF_SECONDS.get(D1) returns None warmup silently skipped for D1 strategies. Concrete repro: load D1 strategy -- initial backfill never fetched.",
+      "reviewer_note": "Valid HIGH. Concrete reproducible bug with D1 strategy warmup."
+    },
+    {
+      "id": "DE-006",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at quality_engine.py:118-121: spread_check_mode=disabled default. No production config enforces enable. Flash crash chain (anomalous bar -> ATR explosion -> SL overflow -> margin bypass -> oversized position) is low-probability high-impact. Disabled default with no enforcement mechanism for production is a systemic oversight.",
+      "reviewer_note": "Valid HIGH. Temporary disabled default has no mechanism to become enabled in production."
+    },
+    {
+      "id": "DE-007",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at redis_store.py:1-199: zero TTL zero retry zero reconnect zero connection_pool. FTS CLAUDE.md:28 lists PostgreSQL+TimescaleDB as primary DB but postgres_store.py does not exist. Redis is sole persistence backend. Redis downtime = total state loss including kill-switch state. Amplifies RE-001.",
+      "reviewer_note": "Valid HIGH. Single-point-of-failure for safety-critical state."
+    },
+    {
+      "id": "DE-008",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at live_store.py:408-431: _warn_trim_once is one-shot flag. Comment lines 427-430 acknowledges parity drift risk. Zero Prometheus metrics zero PTRC notification zero dashboard visibility on buffer trim. For period=400 strategies effective_buffer=20000=MAX_BUFFER_SIZE exactly.",
+      "reviewer_note": "Valid HIGH. Silent parity drift without observability."
+    },
+    {
+      "id": "QT-001",
+      "original_severity": "high",
+      "adjusted_severity": "low",
+      "validated": true,
+      "rationale": "Factually correct -- test asserts only len(results)==10. Test infrastructure issue not production code.",
+      "reviewer_note": "Downgraded. Test quality debt not production risk."
+    },
+    {
+      "id": "QT-002",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "_check_max_daily_loss and _check_per_pair_exposure lack dedicated unit tests. RE-002 (CRITICAL) demonstrates a PTRC ordering bug went undetected without direct unit coverage. Concrete gap that allowed a critical safety bug to persist.",
+      "reviewer_note": "Valid HIGH. RE-002 proves the risk of missing PTRC unit tests."
+    },
+    {
+      "id": "QT-003",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed: test_full_signal_to_fill_flow asserts only feature_store.bar_count==200. Synthetic random-walk data may produce zero signals. If fills_completed=0 entire PTRC->Order->Fill path is unexercised while CI shows green.",
+      "reviewer_note": "Valid HIGH. E2E flow test that may never exercise the flow is actively misleading."
+    },
+    {
+      "id": "QT-004",
+      "original_severity": "high",
+      "adjusted_severity": "low",
+      "validated": false,
+      "rationale": "Expert cites only negative evidence: test does not exist and 429 handling is unconfirmable without reading oanda_adapter/client.py. No proof of incorrect behavior. Cannot validate as HIGH without confirming 429 IS mishandled. Rejected as vibes-based.",
+      "reviewer_note": "Rejected. Resubmit as LOW test coverage request with code evidence."
+    },
+    {
+      "id": "QT-005",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": false,
+      "rationale": "Expert asserts silent event drop on queue full but provides no evidence of queue size limits in memory_adapter.py and admits behavior is unconfirmed. PA-005 (validated) covers the confirmed _running=False drop. Rejected as vibes-based.",
+      "reviewer_note": "Rejected. Queue overflow claim needs code evidence. PA-005 covers the confirmed drop case."
+    },
+    {
+      "id": "QT-006",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Correct and complements RE-001. No test simulates process restart + recovery of SUBMITTED orders. RE-001 (CRITICAL) confirms load_* APIs never called in production. FTS CLAUDE.md:130-132 mandates Order Reconciliation. This test gap allowed RE-001 to exist undetected.",
+      "reviewer_note": "Valid HIGH. Test gap directly allowed RE-001 (CRITICAL) to go undetected."
+    },
+    {
+      "id": "QT-007",
+      "original_severity": "high",
+      "adjusted_severity": "low",
+      "validated": true,
+      "rationale": "Correct that synthetic data lacks OANDA-specific characteristics. No concrete known failure mode proven. Parity tests already validate numerical correctness independently.",
+      "reviewer_note": "Downgraded. Valid improvement with no proven failure mode."
+    },
+    {
+      "id": "DO-001",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at health_check.py:35: CRITICAL_COMPONENTS does not include StrategyWorker. main.py:207-209 registers event_bus coordinator broker -- not workers. StrategyWorker asyncio crash leaves HealthChecker reporting healthy. Concrete repro: inject exception in worker._process_bar -- health endpoint returns 200.",
+      "reviewer_note": "Valid HIGH. Silent worker crash with false healthy status."
+    },
+    {
+      "id": "DO-002",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at main.py:450-462: oanda_prober uses REST GET only. stream_receiver has no HealthChecker notification. OANDA streaming token expiry (REST valid stream dead) is a documented API behavior. Tick stream death cascades to stale features with no automated response.",
+      "reviewer_note": "Valid HIGH. REST-only probe misses the actual trade-critical data path."
+    },
+    {
+      "id": "DO-003",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at metrics.py:99-103: fx_open_positions Gauge registered. No set_open_positions() method exists. Codebase-wide grep confirms zero writes to _gauges. Gauge permanently at 0. Open position count alerting completely blind.",
+      "reviewer_note": "Valid HIGH. devops-monitor labeled CRITICAL -- HIGH appropriate since monitoring gap not direct money risk."
+    },
+    {
+      "id": "DO-004",
+      "original_severity": "high",
+      "adjusted_severity": "low",
+      "validated": true,
+      "rationale": "Event bus queue depth metric absent. However Redis PubSub is fire-and-forget with no server-side queue. The monitoring gap is real but failure mode not applicable to this architecture.",
+      "reviewer_note": "Downgraded. Redis PubSub has no server-side queue to monitor."
+    },
+    {
+      "id": "DO-005",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed at metrics.py:235-238: fx_feature_staleness_sec Gauge defined and implemented. alerting_rules.yml (96 lines confirmed) has no matching alert rule. Tick feed death -> stale features -> stale signals with no automated alert. Metric-alert chain broken.",
+      "reviewer_note": "Valid HIGH. Metric exists but alerting is disconnected."
+    },
+    {
+      "id": "DO-006",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "validated": true,
+      "rationale": "Confirmed: position_reconciler.py has zero MetricsCollector references. runbook/position_mismatch.md:19 uses conditional language. No alerting_rules.yml entry for reconciler. Reconciler mismatch is the primary safety net for broker/local state divergence. Silent gap means mismatches invisible to operators.",
+      "reviewer_note": "Valid HIGH. Reconciler mismatch with no alerting blinds primary state integrity safety net."
+    },
+    {
+      "id": "DO-007",
+      "original_severity": "high",
+      "adjusted_severity": "low",
+      "validated": true,
+      "rationale": "Confirmed at stream_receiver.py:322-331: logger.info in WARN path of hot-path _handle_price(). Performance/logging overhead not correctness or safety. Prometheus counter correctly incremented.",
+      "reviewer_note": "Downgraded. Hot-path logging overhead not a safety issue."
+    },
+    {
+      "id": "DO-008",
+      "original_severity": "high",
+      "adjusted_severity": "low",
+      "validated": true,
+      "rationale": "Confirmed at app.py:177-180: time.sleep(5) then st.rerun(). Dashboard is monitoring only -- KS activation does not depend on it. 5s display lag carries no direct trading risk.",
+      "reviewer_note": "Downgraded. UX quality issue."
+    },
+    {
+      "id": "DO-009",
+      "original_severity": "high",
+      "adjusted_severity": "low",
+      "validated": true,
+      "rationale": "Absence of partial_fill.md runbook is documentation debt. OANDA market orders for retail FX fill atomically in vast majority of cases. Documentation gap not code defect.",
+      "reviewer_note": "Downgraded. Documentation gap with low operational probability in retail FX context."
+    }
+  ]
+}

@@ -1,0 +1,177 @@
+{
+  "agent": "data-engineer",
+  "round": 2,
+  "audit_id": "AUDIT-2026-0418-002",
+  "focus": "feature_store_market_data_parity_state_store",
+  "summary": {
+    "carryover_from_round_1": "DE-001〜008 すべて fix 未着手。コード側は Round 1 以降 d99a425 の RE-001 が redis_store.py に scan_keys / load_all_* API を追加したのみで、DE-00x 領域は未変更（grep 確認）。",
+    "round_2_reprioritization": "DE-003（D1/H4 境界 UTC vs NY 5PM）と DE-004（tick_aggregation truth_source デフォルト）を最上位に上げる。両者は Live 発注直結の Parity 崩れであり、生成戦略がすぐに BT と異なる挙動を示すため。DE-007（StateStore retry/postgres 未実装）は d99a425 で recovery 側が fail-closed 化され、Redis ping prober も main.py:425-436 で稼働。従って DE-007 は実害が dampened、Round 2 での優先度を下げる。DE-001（indicators 二重実装）は Parity テストで保護されており即時致命ではない。DE-002（warmup 未実装）は SHARED_CONTRACT §12.3 で明示的に『別途追跡』となっており DE-003/004 と同等の Live 発注リスクだが、Gate が働く範囲では出力が NaN → StrategySlot で None シグナル化する可能性が高いため（StrategySlot.on_bar は features 欠損時に安全側へ倒す）、DE-003/004 より 1 段下げる。DE-005（TF 辞書重複）/DE-006（spread disabled）/DE-008（buffer 張り付き warn のみ）は仕様上 guarded な部分があり Round 2 では繰越。",
+    "new_high_findings": "2 件（DE-R2-009 scan_keys Redis 本番実装欠如、DE-R2-010 get_candles 無 retry & 429 ハンドリング欠如）。DE-R2-011 は Timezone / DataQuality の副次。",
+    "dropped_concerns": "Parquet 書込 atomicity: FTS は現時点で .parquet 出力経路を trading_platform/ 配下に持たない（grep 0 件）。trade_context snapshot は JSONL + fsync で実装済み。よって Parquet 懸念は該当なし。"
+  },
+  "findings": [
+    {
+      "id": "DE-R2-009",
+      "severity": "high",
+      "area": "state_store",
+      "title": "StateStoreBackend.scan_keys は Protocol と InMemoryBackend 実装しかなく、本番 Redis Backend が未実装 — 再起動時の状態復元経路が本番環境で NotImplementedError となる",
+      "description": "Round 1 の RE-001（d99a425）で StateStoreBackend Protocol に `scan_keys(match: str) -> list[str]` を追加し、load_all_orders / load_all_positions / recover_state の骨格を整えた。main.py は起動時 `_recover_state_fail_closed()` を呼び、失敗時はプロセス停止する fail-closed 設計。しかし scan_keys の具体実装は InMemoryBackend のみで（redis_store.py:71-80）、本番用 `RedisBackend` クラスは fx_trading_system 内に存在しない（grep 確認）。 main.py 側では `from_url(redis_url)` で aioredis に直接つないでいる箇所があるが（main.py:427-430, event_bus/redis_adapter.py:102）、これは HealthChecker prober と Event Bus PubSub 用であり、StateStore 用ではない。つまり本番 Redis を接続した StateStore を作る経路が現状なく、Redis URL を設定しても StateStore は InMemoryBackend で起動 → プロセス再起動で全ポジション・注文・Kill Switch 状態が失われる。RE-001 の fail-closed 設計は「復元に失敗したら起動拒否」を保証するが、『In-memory で空復元が成功する』ケースでは空配列が正常復元として扱われ素通りする。Round 1 fix の設計意図（Kill Switch を再起動越しに保持）が実務では動いていない死角。加えて、将来 Redis Backend を実装する際に `SCAN` の `COUNT` パラメータ（キー数の hint）を指定しない redis-py デフォルト（COUNT=10）で大量キー時にラウンドトリップが膨らみ、復元中ブロッキングが発生する懸念も事前に契約化しておく必要がある。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/state_store/redis_store.py:27-80",
+        "fx_trading_system/trading_platform/main.py:547-689",
+        "fx_trading_system/trading_platform/core/event_bus/redis_adapter.py:100-108",
+        "fx_trading_system/tests/fault/test_redis_disconnect.py:52-119"
+      ],
+      "suggested_fix": "(1) `data/state_store/redis_store.py` に `RedisStateBackend` クラスを実装（aioredis.from_url ベース）。`scan_keys(match)` は `self._redis.scan_iter(match=match, count=500)` を async iter で受け、list に収める。COUNT=500 で本番 10k キーでも 20 ラウンドトリップ以内に収まる設計根拠をコメント化する。`hset/hget/hgetall/delete/set/get` を aioredis で薄くラップし、ConnectionError 発生時は StateStoreConnectionError にラップして呼び出し元（recover_state）が fail-closed 判定できるよう例外型を明示する。 (2) `main.py` で settings.redis_url が有効なら StateStore の backend に RedisStateBackend を注入する wire-up を追加（現状未配線）。 (3) fallback として skip_state_recovery=True 経路と in-memory fallback を区別するため、StateStore 初期化時に `redis_required=True` オプションを追加し、InMemoryBackend fallback が起きた場合に loud WARN + Prometheus metric state_store_backend_type{backend=\"in_memory\"} を出す。 (4) StateStoreBackend Protocol の scan_keys docstring に『Redis 実装は SCAN COUNT を明示、大量 key 時に latency を計測、1 回のスキャンが 100ms を超えたら WARN』契約を追記する。"
+    },
+    {
+      "id": "DE-R2-010",
+      "severity": "high",
+      "area": "market_data / broker_api",
+      "title": "OANDABroker.get_candles に retry / 429 / Retry-After 尊重が一切なく、CandleFetcher の Truth 経路が API レート制限・一時断で silent fail する",
+      "description": "`broker/oanda_adapter/client.py:545-596` の `get_candles` は `async with session.get(url) as resp` で 1 回だけ叩き、`resp.status != 200` で `ConnectionError` を raise するのみ。CandleFetcher._poll_loop は例外を catch して `self._fetch_errors += 1` で記録するだけで次の poll_interval（既定 2 秒）まで待機する。OANDA v20 は 120 req/sec の account 単位レート制限に加え、HTTP 429 Too Many Requests と 503 Service Unavailable を返すことがあり、`Retry-After` ヘッダが付く。現状コードは (a) 429 をただの ConnectionError としてログに流し、(b) Retry-After を尊重せず 2 秒固定で再叩きし、(c) 連続 5xx で CandleFetcher だけが Truth 経路を失い続ける（truth_source='oanda_candle' モードでは確定バーが数分〜停止中ずっと発行されない）、という挙動になる。さらに 5000 count の limit も client.py 内では enforce されておらず、fetch_count=DEFAULT_CANDLE_FETCH_COUNT=2 なので通常は問題ないが、`fetch_range`（backfill 用）は `count = min(needed, 5000)` を candle_fetcher.py:310 で計算しつつ、client 側にも enforce が欲しい。DE-007 の Redis 回復経路と異なり、こちらは確定バーが止まれば generate_signal も止まる（最重要の Live 直結）ため HIGH。SHARED_CONTRACT §10 の API契約として retry 方針未定義。",
+      "evidence": [
+        "fx_trading_system/trading_platform/broker/oanda_adapter/client.py:545-596",
+        "fx_trading_system/trading_platform/data/market_data/candle_fetcher.py:164-192",
+        "fx_trading_system/trading_platform/data/market_data/candle_fetcher.py:307-310"
+      ],
+      "suggested_fix": "(1) client.py に共通 retry ヘルパ `_request_with_retry(session, method, url, *, max_attempts=3, base_backoff=0.5)` を追加。5xx / 429 / aiohttp.ClientConnectorError / ServerTimeoutError をリトライ対象とし、429 は resp.headers.get('Retry-After') を読んで sleep する。200/201 と 4xx（429 以外）は即 return / raise。 (2) get_candles / create_order / cancel_order / get_account_summary 全てにこのヘルパを適用。create_order は冪等性の観点から retry 対象外（既存コードで既に非 retry）だが、get_* は自然に idempotent なので安全。 (3) CandleFetcher._poll_loop で 3 回連続 fetch_errors が発生したら metrics.candle_fetch_degraded をインクリメントし、さらに 5 分連続でバーが発行されない場合 kill_switch_fn を呼ぶ（stream_receiver の backfill 失敗と同じパターン）。 (4) client.get_candles の count 引数を `count: int = 100` → `count: int = Field(ge=1, le=5000)` 相当で validator 化し、5001 以上を渡したら ValueError を raise する。"
+    },
+    {
+      "id": "DE-R2-011",
+      "severity": "high",
+      "area": "data_quality / timezone",
+      "title": "DataQualityConfig.spread_check_mode='disabled' デフォルトのまま production 起動するチェックが config 層に無く、settings.truth_source バリデータと unsymmetric",
+      "description": "DE-006 と重複するが、Round 2 時点で新しい観点として「`truth_source` は settings.py:201-206 で field_validator により値制約があるのに、`spread_check_mode` は DataQualityConfig.Field で Literal 制約のみで environment-gate されていない」ことを指摘する。config/environments/ 配下（production.py / staging.py / research.py）に spread_check_mode の上書きが一切無く、production 環境でも DataQualityConfig() デフォルト（'disabled'）で起動する。SHARED_CONTRACT §12.4 では『本番投入時は spread_check_mode=\"disabled\" で起動し、livelog で 1 週間観測したうえで pip_based へ切替える 2 段階ロールアウト』と明示しているが、実コード・実設定ファイルに切替を強制する lint / startup check が無い。1 週間の観測期間が過ぎたかどうかを検証する手段が人間の記憶依存。加えて timezone 観点では、DataQualityEngine._check_timestamp_order / _check_gap が `bar.bar_time` を `datetime.now(timezone.utc)` との差分で評価している箇所が無く（quality_engine.py の検索で 2 件のみヒット）、BarEvent.bar_time の tz が naive で渡されてきた場合に `ts - ts % period` 計算が bar_builder._get_bar_start 内で tz-aware 化されるものの、他経路（CandleFetcher._parse_candle_time）は明示的に astimezone(timezone.utc) する。両者を経由したバーが mix したときに pd.merge_asof で DST 境界の tz-aware/naive 比較エラーが発生しうる。LiveFeatureStore._align_aux_to_primary (live_store.py:562) は `pd.DatetimeIndex(primary_df['timestamp'])` で tz 情報を無視して index 化するため、補助 TF の close_time + Timedelta 比較が tz-naive vs tz-aware で TypeError となり得る（Parity テストは UTC 統一データで走るため拾えない）。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/quality/quality_engine.py:118-121",
+        "fx_trading_system/trading_platform/config/settings.py:201-206",
+        "fx_trading_system/trading_platform/data/feature_store/live_store.py:555-580",
+        "fx_trading_system/docs/SHARED_CONTRACT.md:333-339"
+      ],
+      "suggested_fix": "(1) config/environments/production.py に `DATA_QUALITY_SPREAD_CHECK_MODE='pip_based'` と `spread_check_mode_rollout_deadline: datetime = 2026-05-01T00:00:00Z` を追加。main.py 起動時、production 環境で `spread_check_mode=='disabled'` かつ現在時刻が deadline を過ぎていたら ValueError で起動拒否する。 (2) LiveFeatureStore._align_aux_to_primary の `pd.DatetimeIndex(primary_df['timestamp'])` / `pd.DatetimeIndex(aux_df['timestamp'])` を `pd.to_datetime(..., utc=True)` で UTC 強制正規化する。tz-naive の timestamp が混入した場合は警告ログ + UTC 補完する。 (3) tests/unit/test_timezone_consistency.py を新設し、BarBuilder → CandleFetcher → LiveFeatureStore の 3 経路で tz-aware UTC が一貫していることを assert。"
+    },
+    {
+      "id": "DE-001",
+      "severity": "high",
+      "area": "feature_store",
+      "title": "【Round 1 再評価】 Indicator 二重実装 — Parity テストで守られているため単独では即致命ではないが DE-005 と連動する構造的リスク",
+      "description": "Round 1 の DE-001 評価を継続。ATLAS `_SimpleFeatureStore` (vectorbt_engine.py) と FTS `build_builtin_indicators` (indicators.py) の二重実装が SHARED_CONTRACT §4 で正当化されているが、片側更新検知は Parity テスト依存。Round 2 での再評価: 既存 tests/parity/test_feature_store_parity.py が `test_all_builtin_indicators_match` を保証しているため実害は低い。ただし DE-005（TF_SECONDS 辞書 3 重複）と組み合わさると『インジケータ本体は一致するが計算に使う TF 秒数が片側で違う』という Parity テストで拾えない欠陥を産む（Parity テストは primary_tf='H1' 固定のデータで走っているため aux TF 秒数の差を検出しない）。よって『DE-001 単独 → 優先度中、DE-005 と組で → HIGH 構造リスク』。Round 2 では DE-005 の修正を優先し、DE-001 はフォローアップ。",
+      "evidence": [
+        "ATLAS/atlas/backtest/vectorbt_engine.py:253-556",
+        "fx_trading_system/trading_platform/data/feature_store/indicators.py:17-236",
+        "fx_trading_system/tests/parity/"
+      ],
+      "suggested_fix": "Round 2 では DE-005 修正後にセットで対処。atlas.common.indicators パッケージへの一元化案は維持するが、Round 2 スコープ外。"
+    },
+    {
+      "id": "DE-002",
+      "severity": "high",
+      "area": "feature_store",
+      "title": "【Round 1 再評価】 LiveFeatureStore.is_warmed_up 未実装 — SHARED_CONTRACT §12.3 で明示的 TODO、発注直結リスク高",
+      "description": "Round 1 評価を維持。SHARED_CONTRACT §12.3 で『warmup 完了監視の強化必須（DE-R1-004 相当）』『LiveFeatureStore.is_warmed_up() の監視と warmup 未完時の SignalEvent 抑止』が未実装項目として明記。実コードでは live_store.py に is_warmed_up 相当メソッドは存在せず（grep 0 件）、StrategyWorker._process_bar は bar_count に関わらず generate_signal を呼び出す。Round 2 再評価: DE-004（truth_source デフォルト tick_aggregation）と組み合わさると、warmup 未完 + tick 集約値（OANDA candle と乖離）で戦略が発注する二重の Parity 崩れが発生する。しかし現状の LiveFeatureStore は NaN を返す → generate_signal が None シグナルを返す実装前提（既存戦略の定番パターン）なので、発注完全阻止は strategy 側実装依存。DE-003/004 よりはワンクッションある。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/feature_store/live_store.py:276-299",
+        "fx_trading_system/docs/SHARED_CONTRACT.md:322-331",
+        "fx_trading_system/trading_platform/core/strategy_engine/worker.py:292-356"
+      ],
+      "suggested_fix": "Round 1 記載と同じ: is_warmed_up() を実装し、StrategySlot._process_bar_internal（LIVE 経路）でも gate する。PA-R2-001 の executor 隔離修正と同じタイミングで strategy_slot.py にも warmup guard を入れれば一挙解決。"
+    },
+    {
+      "id": "DE-003",
+      "severity": "high",
+      "area": "bar_boundary",
+      "title": "【Round 1 再評価・最優先】 BarBuilder の D/H4 境界 UTC 固定 vs OANDA NY 5PM アライン — Live 発注直結の Parity 破壊",
+      "description": "Round 1 評価を維持し、Round 2 では DE シリーズの筆頭に昇格。BarBuilder._get_bar_start は UTC エポック基準で period 秒単位に align する（bar_builder.py:342-348）が、OANDA candles API は既定で dailyAlignment=17 / alignmentTimezone=America/New_York を返す。過去監査（round_0415_4_r4 / round_0415_4_r2）でも R2-05_d1_alignment として UNFIXED 記録あり、10 ヶ月以上放置。client.py:565 の get_candles URL は `granularity={granularity}&count={count}&price=M` のみで `dailyAlignment` / `alignmentTimezone` を明示せず、OANDA 側既定のまま返ってくる。D1/H4 戦略を truth_source='tick_aggregation' で動かすと BT と 1 日ズレる。Round 2 での優先度根拠: 既存 ATLAS の生成戦略の 30%+ が MTF（主 H1 + 補助 H4 or D1）で、aux_tf='H4' でも同じ問題（OANDA H4 は 04:00/08:00/.../00:00 NY = UTC 21:00/01:00/... DST 依存）。D1 だけでなく H4 MTF 戦略も影響。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/market_data/bar_builder.py:342-348",
+        "fx_trading_system/trading_platform/broker/oanda_adapter/client.py:561-596",
+        "fx_trading_system/logs/audit/round_0415_4_r4/findings/data-engineer.json:16",
+        "fx_trading_system/logs/audit/round_0415_4_r2/findings/data-engineer.json:54"
+      ],
+      "suggested_fix": "(1) OANDABroker.get_candles に `alignment_timezone: str='UTC'` / `daily_alignment: int=0` 引数を追加し、URL に `&alignmentTimezone=UTC&dailyAlignment=0` を付ける。これで OANDA も UTC 00:00 align に統一される。 (2) ATLAS data_loader.py:167 も同パラメータを渡して BT/Live 両方を UTC 基準に揃える（SHARED_CONTRACT 更新必須）。 (3) H4 は alignmentTimezone=UTC で UTC 00:00/04:00/08:00/12:00/16:00/20:00 にアラインされる — BarBuilder の UTC period 割り切りと完全一致。 (4) Round 2 で採用する場合、ATLAS 側のヒストリカルデータ（既に NY 17:00 アラインで保存）との互換性を注意。ATLAS 側データの再取得コストが高ければ、逆に BarBuilder を alignment_timezone config で NY 17:00 aware にする代替案も可。"
+    },
+    {
+      "id": "DE-004",
+      "severity": "high",
+      "area": "market_data",
+      "title": "【Round 1 再評価・最優先】 truth_source デフォルトが tick_aggregation — Live 運用中の高確率 Parity 崩れ",
+      "description": "Round 1 評価を維持し、DE-003 と同順位で Round 2 筆頭。config/settings.py:112 で `truth_source: str = 'tick_aggregation'` が default。production.py 等の environment ファイルで上書きされていなければ、Live 口座運用でも Tick mid 集約が Truth になる → volume は tick count、H/L は mid range（OANDA の bid/ask 範囲より狭い）。DE-003 の境界ズレと独立で、同じバーでも OHLC 値が OANDA 公式と違う。 Round 2 での新観点: main.py:280, 287 で truth_source が BarBuilder に渡されるが、production environment での enforce が無い。ユーザが `ENV=production python -m trading_platform.main` を叩いても default tick_aggregation で起動する。DE-006（spread_check disabled）と同じ『本番で要切替だが切替忘れを検知する仕組みが無い』構造欠陥。",
+      "evidence": [
+        "fx_trading_system/trading_platform/config/settings.py:112-119",
+        "fx_trading_system/trading_platform/data/market_data/bar_builder.py:80-91",
+        "fx_trading_system/trading_platform/data/market_data/candle_fetcher.py:10-13",
+        "fx_trading_system/trading_platform/main.py:280-299"
+      ],
+      "suggested_fix": "(1) production.py / live.py 等で `truth_source: str = 'oanda_candle'` を強制する。 (2) main.py で env == 'production' かつ truth_source == 'tick_aggregation' ならば起動拒否（ValueError）。 (3) BarBuilder.__init__ に kwarg `allow_live_tick_aggregation: bool = False` を追加し、Paper/Research 以外では False enforce。"
+    },
+    {
+      "id": "DE-005",
+      "severity": "high",
+      "area": "feature_store / market_data",
+      "title": "【Round 1 再評価・優先度維持】 TF_SECONDS 辞書 3 重定義、D/D1 キー差異",
+      "description": "Round 1 評価を維持。live_store.py:66-74 は D1 のみ、stream_receiver.py:52-55 は D のみ、data/common/timeframes.py:23-32 は両方。LiveFeatureStore._normalize_tf で D→D1 に揃えるロジック（live_store.py:80-85）がある一方、stream_receiver._run_initial_backfill（line 425）は _TF_SECONDS.get(tf) で直接 lookup し、'D1' が渡されると None → warning で backfill スキップ。BarEvent.timeframe は str Enum で 'D1' を返すため、backfill_timeframes に Timeframe.D1.value を渡すと初回 warmup backfill が全スキップされる構造欠陥。Round 2 で timeframes.py が既に統一マップを提供している（TIMEFRAME_SECONDS に D と D1 両方）ため、live_store.py と stream_receiver.py を書き換えるだけで消せる軽量 fix。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/feature_store/live_store.py:66-74",
+        "fx_trading_system/trading_platform/data/market_data/stream_receiver.py:52-55",
+        "fx_trading_system/trading_platform/data/common/timeframes.py:23-32"
+      ],
+      "suggested_fix": "Round 1 記載通り。具体的には live_store.py の TF_SECONDS と stream_receiver.py の _TF_SECONDS を削除し、両ファイル冒頭で `from trading_platform.data.common.timeframes import TIMEFRAME_SECONDS` を import する。_normalize_tf も timeframes.py に移動。tests/unit/test_timeframe_consistency.py を追加。Round 2 で採用候補（1〜2 件 fix 枠に入るには DE-003/004 より軽量だが、ユーザ影響度が低いので 2 番手）。"
+    },
+    {
+      "id": "DE-006",
+      "severity": "high",
+      "area": "data_quality",
+      "title": "【Round 1 再評価・繰越】 spread_check_mode='disabled' デフォルト — DE-R2-011 と統合し Round 3 フォローアップ",
+      "description": "Round 1 評価を維持。実態は DE-R2-011 で再論じたので、本項は Round 3 に繰越して DE-R2-011 と統合して扱う。Round 2 単独 fix の候補からは外す。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/quality/quality_engine.py:118-121",
+        "fx_trading_system/docs/SHARED_CONTRACT.md:334-339"
+      ],
+      "suggested_fix": "DE-R2-011 と統合。"
+    },
+    {
+      "id": "DE-007",
+      "severity": "high",
+      "area": "state_store",
+      "title": "【Round 1 再評価・降格（実質 medium）】 Redis 自動再接続・TTL・postgres 未実装 — d99a425 (RE-001) と main.py の HealthChecker でリスク一部緩和",
+      "description": "Round 1 評価を再検討。d99a425 で StateStore 復元が main.py 起動時に fail-closed で走るようになり、main.py:425-436 で Redis ping prober が critical probers に登録された（ping NG で health check が落ちる）。postgres_store.py 未実装・TTL 未設定・自動再接続 tenacity 未配線の指摘そのものは未解決だが、Round 2 では『再起動時は fail-closed、稼働中は HealthChecker が落ちれば運用者対応』という防衛ラインができている。Round 2 で新発見した DE-R2-009（本番 RedisBackend 未実装）の方が問題の本質であり、DE-007 の『retry 未実装』はその下位論点。よって DE-007 単独の優先度は medium 程度に下げ、DE-R2-009 に統合して追跡する。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/state_store/redis_store.py:1-282",
+        "fx_trading_system/trading_platform/main.py:420-436",
+        "fx_trading_system/trading_platform/main.py:547-689"
+      ],
+      "suggested_fix": "DE-R2-009 に吸収。postgres_store.py 実装は中期タスクとして継続追跡。"
+    },
+    {
+      "id": "DE-008",
+      "severity": "high",
+      "area": "feature_store",
+      "title": "【Round 1 再評価・繰越】 MAX_BUFFER_SIZE=20000 張り付き WARN-only — 優先度維持、Round 3 枠",
+      "description": "Round 1 評価を維持。live_store.py:408-431 の _warn_trim_once は初回一度だけ WARN を出し、以降は無言でトリム継続。BUFFER_SAFETY_FACTOR=50 が十分 EWM 収束を保証する値なので、MAX_BUFFER_SIZE に張り付くのは period>400 という異常設計のみ。ATLAS Gen1-100 の戦略で period>200 は稀で、現状即致命ではないが『警報があっても kill switch に届かない』構造は残る。Round 2 の 5 枠には入れない。",
+      "evidence": [
+        "fx_trading_system/trading_platform/data/feature_store/live_store.py:38-52",
+        "fx_trading_system/trading_platform/data/feature_store/live_store.py:408-431"
+      ],
+      "suggested_fix": "Round 1 記載通り。_effective_buffer_size == MAX_BUFFER_SIZE に到達した register() 時点で ValueError で戦略ロード拒否 + metrics.inc_feature_store_buffer_trim を追加。"
+    }
+  ],
+  "round_2_fix_recommendation": {
+    "if_pick_1": {
+      "finding_id": "DE-004",
+      "reason": "truth_source デフォルトを production で oanda_candle に enforce するのは設定 1 箇所 + main.py validator 1 箇所の軽量修正で、Live 発注直結の Parity 破壊を即座に潰せる。DE-003 の境界ズレは OANDA 側に alignmentTimezone パラメータを投げれば解決する姉妹問題だが、ATLAS 側 data_loader.py の歴史データ互換性検討が必要（SHARED_CONTRACT 更新含む）で Round 2 のスコープを超える。DE-004 単独で『Live 本番で間違ったデータで発注する』経路を閉じられる。"
+    },
+    "if_pick_2": {
+      "finding_ids": ["DE-004", "DE-005"],
+      "reason": "DE-004（truth_source enforce）+ DE-005（TF_SECONDS 辞書統一）のペア。両者ともコード変更量が小さく、DE-004 で Live 発注の Truth 経路を固定し、DE-005 で MTF 戦略の初回 warmup backfill を D1 で動かしたときのサイレント失敗（stream_receiver._TF_SECONDS.get('D1') → None）を解消する。D1 戦略が実運用初日にインジケータ未収束状態で発注するリスクを両方同時に閉じられる。DE-003 は Round 3 で ATLAS 側との協調 fix とする。DE-R2-009（RedisBackend 未実装）も魅力的だが、d99a425 の Redis ping prober で起動時 fail-closed が効いているため、Round 2 より Round 3 で RE 系と統合 fix が適切。"
+    },
+    "explicitly_deprioritized": [
+      {"finding_id": "DE-001", "reason": "Parity テスト保護あり"},
+      {"finding_id": "DE-002", "reason": "NaN → None シグナルで発注は抑止される可能性が高い"},
+      {"finding_id": "DE-006", "reason": "DE-R2-011 に統合"},
+      {"finding_id": "DE-007", "reason": "DE-R2-009 に統合、RE 側で緩和済み"},
+      {"finding_id": "DE-008", "reason": "period>400 指定が現状の生成戦略に存在しない"},
+      {"finding_id": "DE-R2-011", "reason": "DE-006 + timezone 副次論点、Round 3 で統合 fix"}
+    ]
+  }
+}

@@ -1,0 +1,185 @@
+{
+  "agent": "quant-analyst",
+  "round": 2,
+  "audit_date": "2026-04-18",
+  "commits_reviewed": [
+    "b5ea676"
+  ],
+  "findings": [
+    {
+      "id": "QA-001",
+      "carryover_from_round_1": true,
+      "severity": "high",
+      "status": "not_resolved",
+      "area": "backtest/sharpe_annualization",
+      "title": "L1 (vectorbt) と L2 (event_simulator) の Sharpe 年率化基底が現行コードでも乖離",
+      "description": "Round1 未修正。vectorbt_engine.py:591 は freq=1h のみで year_freq 未設定。Round2 実行時検証で vbt.settings.returns year_freq は 365 days。H1 で L1=8760 bars/year に対し L2 BARS_PER_YEAR[H1]=6240 (5日/週x52週x24h)。系統倍率 sqrt(8760/6240)=1.184x で L1 Sharpe が恒常膨張。(1) L1_MIN_SHARPE=0.3 スクリーニングが実効厳格、(2) パラメータ感度分析 CV がノイズ込み推定、(3) GATE_MAX_L1_L2_DRIFT=0.30 警告が系統バイアス込み発火。CLAUDE.md L87 Immutable 原則の『計算ロジックも Immutable』条項に違反。",
+      "evidence": [
+        "ATLAS/atlas/backtest/vectorbt_engine.py:591",
+        "ATLAS/atlas/backtest/vectorbt_engine.py:629",
+        "ATLAS/atlas/backtest/event_simulator.py:801-818",
+        "ATLAS/atlas/config/defaults.py:211-221",
+        "Round2 実行確認: vbt.settings.returns year_freq = 365 days"
+      ],
+      "suggested_fix": "pf.returns().sharpe_ratio(ann_factor=BARS_PER_YEAR[tf]) を呼ぶか、vbt.settings.returns year_freq を BARS_PER_YEAR[tf] 基底で設定。推奨: event_simulator と同じ (mean*N)/(std*sqrt(N)) 式で手動算出しゴールデンテスト tests/golden/test_vectorbt_engine.py に ann_factor アサート追加。"
+    },
+    {
+      "id": "QA-002",
+      "carryover_from_round_1": true,
+      "severity": "high",
+      "status": "not_resolved",
+      "area": "backtest/gate13_excess_return",
+      "title": "Gate #13 B&H 超過リターンの market_exposure 正規化が低エクスポージャ戦略を有利化 (現行継続)",
+      "description": "Round1 未修正、実データで症状継続。event_simulator.py:875-881 は bh_excess_return_pct = total_return_pct - bh_return_pct * exposure を維持。Round2 実読確認 ATLAS-2026-0417-003: total_return=231.72, bh_return=36.94, exposure=0.1155, excess=227.46 で Gate #13 trivially 通過 (overall_passed=False は PF/WFA 不足による別条件失格)。低エクスポージャ戦略は bh_return x exposure が小さく引かれるため構造的に Gate 通過しやすい。event_simulator.py:880 の exposure=1.0 フォールバックは旧 schema 戦略に 1.0 を強制し逆に厳しく判定する schema 跨ぎ非対称を温存。",
+      "evidence": [
+        "ATLAS/atlas/backtest/event_simulator.py:868-881",
+        "ATLAS/atlas/config/defaults.py:52",
+        "ATLAS/CLAUDE.md:113 Gate #13 脚注",
+        "ATLAS/strategies/ATLAS-2026-0417-003/backtest/result.json 実測"
+      ],
+      "suggested_fix": "Gate #13 を以下のいずれかに移行: (a) Sharpe 比較、(b) 戦略リターン側に exposure 正規化 (total_return/max(exposure,0.05)>=bh_return)、(c) リスク調整 B&H。fallback 1.0 廃止し exposure 取れない結果は新形式で再BT要求 (Gate 未評価=FAIL)。低エクスポージャ戦略 (exposure<0.20) は Gate #13 対象外化+Sharpe ベース代替が理論的に最も安全。"
+    },
+    {
+      "id": "QA-004",
+      "carryover_from_round_1": true,
+      "severity": "high",
+      "status": "not_resolved",
+      "area": "analyzer/metrics_path_resolution",
+      "title": "compute_metrics() の strategies/ パス解決が CWD 依存で _strategies_dir() と非対称 (現行継続)",
+      "description": "Round1 未修正。metrics.py:26 は Path(strategies)/generation_id/backtest/result.json と CWD 相対。一方 runner.py:43-56 の _strategies_dir() は _ATLAS_ROOT 絶対パス優先 (M-3 対策済)。両者非対称のため CLI を ATLAS 外ディレクトリから呼ぶと BT 結果は書き込まれても metrics.py は FileNotFoundError。Skills 内実行 (CWD=ATLAS) では顕在化しないがテスト・CLI 直呼びで再現性原則に反する (同 generation_id が異なる結果を返す)。",
+      "evidence": [
+        "ATLAS/atlas/analyzer/metrics.py:26",
+        "ATLAS/atlas/backtest/runner.py:43-56",
+        "ATLAS/atlas/backtest/runner.py:885"
+      ],
+      "suggested_fix": "atlas/common/paths.py を新設し _strategies_dir() 共通化。metrics.py は import して同じ解決ロジックを使う。dedup.py:338 の base=strategies_dir or Path(strategies) にも波及。ゴールデンテストに異なる CWD からの compute_metrics() 呼出を追加。"
+    },
+    {
+      "id": "QA-005",
+      "carryover_from_round_1": true,
+      "severity": "high",
+      "status": "not_resolved",
+      "area": "backtest/vectorbt_pf_inf",
+      "title": "L1 vectorbt の Profit Factor が gross_loss=0 で inf を返し L2 の None と非対称 (現行継続)",
+      "description": "Round1 未修正。vectorbt_engine.py:618-620 は gross_loss==0 で float(inf) を維持。L2 event_simulator.py:745-749 は None (P8-H1 修正後) で非対称。L1 無敗ケースで pf<L1_MIN_PROFIT_FACTOR 分岐 (L820) は inf をすり抜けて PASS 相当と見做し感度分析・OOS で計算コストを浪費。JSON シリアライズでは float(inf) は Python 側で Infinity を出力するが RFC 8259 非準拠で下流ダッシュボード・SQLite (history.db REAL 列) 保存時に破損リスク。",
+      "evidence": [
+        "ATLAS/atlas/backtest/vectorbt_engine.py:617-620",
+        "ATLAS/atlas/backtest/vectorbt_engine.py:640",
+        "ATLAS/atlas/backtest/vectorbt_engine.py:820",
+        "ATLAS/atlas/backtest/event_simulator.py:740-749"
+      ],
+      "suggested_fix": "vectorbt_engine.py:618-620 を gross_loss>0 else None に修正。L1 早期 reject は pf is None or pf<L1_MIN_PROFIT_FACTOR に拡張 (None=未評価=不合格)。ゴールデンテストに gross_loss=0 ケース追加。"
+    },
+    {
+      "id": "QT-R2-001",
+      "carryover_from_round_1": false,
+      "severity": "high",
+      "status": "new",
+      "area": "backtest/result_parser/equity_stats_on_decimated_curve",
+      "title": "VaR/CVaR/TailRatio/EfficiencyRatio が間引き後 equity_curve (最大500点) で計算され統計量が歪む",
+      "description": "event_simulator.py:1381-1385 は equity_curve を step=len(eq)//500 で最大500点まで間引き Layer2Result.equity_curve に格納。result_parser.py:38 が _compute_equity_stats(l2.equity_curve) に渡し L276 で returns=np.diff(eq)/eq[:-1] と間引き後系列から per-step リターンを算出、VaR/CVaR/TailRatio/EffRatio を計算する。ATLAS-2026-0417-003 (data_bars=99530, equity_curve=501) では真の per-bar 99529 点に対し約 199x 間引き。間引き後ステップリターンはボラティリティが sqrt(199)=14.1x 膨張し VaR/CVaR がその係数で歪む。Efficiency Ratio は mean/std でスケール依存して小さくなる。FXTradeEvaluationMetrics.md の per-bar VaR 想定と矛盾。",
+      "evidence": [
+        "ATLAS/atlas/backtest/event_simulator.py:1381-1385",
+        "ATLAS/atlas/backtest/result_parser.py:38",
+        "ATLAS/atlas/backtest/result_parser.py:270-310",
+        "ATLAS/strategies/ATLAS-2026-0417-003/backtest/result.json 実測 equity_curve=501 data_bars=99530",
+        "ATLAS/atlas/analyzer/metrics.py:76-80"
+      ],
+      "suggested_fix": "3択: (a) _compute_metrics 側で VaR/CVaR/EffRatio/TailRatio を間引き前のフル equity 系列から算出し Layer2Result.risk_stats として保持、result_parser は dict 転記のみ。(b) Layer2Result に equity_sample_step:int を保存し result_parser がスケール補正 (std/sqrt(step) など)。(c) equity_curve 間引きをやめ parquet 別保存。推奨 (a) 算出場所の一元化のため。"
+    },
+    {
+      "id": "QT-R2-002",
+      "carryover_from_round_1": false,
+      "severity": "high",
+      "status": "new",
+      "area": "analyzer/metrics/fill_rate_denominator",
+      "title": "fill_rate が間引き後 equity_curve (max 500) を分母に使い最大200倍過大算出される",
+      "description": "result_parser.py:47-53 は fill_rate=l2.total_trades/len(l2.equity_curve) を計算。l2.equity_curve は event_simulator で 500 点に間引かれる (QT-R2-001 同様)。ATLAS-2026-0417-003 実測: total_trades=808, equity_curve=501, data_bars=99530。真の fill_rate=808/99530=0.0081 に対し現行出力は 808/501=1.612 で約200倍過大。weakness_detector.py:344 は fill_rate>0.05 でトレード頻度高警告を出すため現行ではほぼ全戦略で誤警告発火し『過剰トレードでエントリーフィルター追加推奨』という誤った改善指示が Claude に渡る。Gate には入らないが改善方針の誤誘導 -> 次世代戦略生成の誤った方向性というフィードバックループ汚染 (Gen42-55 失敗実験群の一部が該当する可能性)。",
+      "evidence": [
+        "ATLAS/atlas/backtest/result_parser.py:47-53",
+        "ATLAS/atlas/backtest/event_simulator.py:1381-1385",
+        "ATLAS/atlas/analyzer/weakness_detector.py:344-354",
+        "ATLAS/strategies/ATLAS-2026-0417-003/backtest/result.json 実測: 808/501=1.612 vs 期待 0.0081"
+      ],
+      "suggested_fix": "result_parser.py:47-53 を total_bars=result.data_bars or len(l2.equity_curve); fill_rate=l2.total_trades/total_bars if total_bars else None に修正。BacktestResult.data_bars は間引き前の原バー数 (runner.py:554) を保持。もしくは Layer2Result に total_bars_simulated:int を追加し event_simulator で state.total_bars を書き出し直接参照 (より明示的)。weakness_detector の 0.05 閾値は per-bar 基底で再キャリブレーション必要。"
+    },
+    {
+      "id": "QT-R2-003",
+      "carryover_from_round_1": false,
+      "severity": "high",
+      "status": "new",
+      "area": "backtest/max_drawdown_sign_asymmetry",
+      "title": "L1 max_drawdown_pct は負値、L2 は正値でレイヤ間符号非対称、L1/L2 drift 診断が破綻",
+      "description": "L1 vectorbt_engine.py:632 raw_mdd=float(pf.max_drawdown())*100 は負フラクション (Round2 で -0.0198 実証)。L2 event_simulator.py:829 max_dd_pct=state.max_drawdown*100 は state.max_drawdown が正蓄積 (event_simulator.py:637-638 で dd=(peak-equity)/peak)。結果 result.json に L1=-5.62, L2=17.03 のような符号反転ペア (ATLAS-2026-0417-003 実測)。Gate 判定は L2 のみ使うため合否に影響しないが、(1) Claude のレイヤ間比較で誤解釈、(2) 将来 MaxDD drift チェック追加時に誤比較、(3) history.db の過去 150+ 戦略の L1 max_drawdown_pct 符号不整合で atlas-history 系譜解析が負正混在。CLAUDE.md L87 の計算ロジック Immutable にはレイヤ間一貫性も含むべきで Protocol 違反。",
+      "evidence": [
+        "ATLAS/atlas/backtest/vectorbt_engine.py:632-633",
+        "ATLAS/atlas/backtest/event_simulator.py:636-638",
+        "ATLAS/atlas/backtest/event_simulator.py:829",
+        "Round2 vectorbt 実行確認: pf.max_drawdown() -> -0.0198",
+        "ATLAS/strategies/ATLAS-2026-0417-003/backtest/result.json 実測 L1=-5.62 L2=17.03"
+      ],
+      "suggested_fix": "vectorbt_engine.py:632 を raw_mdd=abs(float(pf.max_drawdown()))*100 に正値化で L2 と統一。ゴールデンテストに MaxDD 符号アサート追加。history.db は [change:spec] として既存値を abs() 正規化するマイグレーションスクリプト用意。METRICS_SCHEMA_VERSION を 4.6.0 -> 4.7.0 にインクリメント。"
+    },
+    {
+      "id": "QT-R2-004",
+      "carryover_from_round_1": false,
+      "severity": "high",
+      "status": "new",
+      "area": "analyzer/dedup/cluster_cap_legacy_asymmetry",
+      "title": "cluster_strategies.capped_members は legacy 含む ranked[:3]、check_duplicate は legacy 除外の same_cluster — Round1 QA-003 で先送りした非対称が残存",
+      "description": "Round1 QA-003 修正で runner.py 側は is_duplicate=True -> overall_passed=False を実装したが、devil-advocate が懸念した dedup.py 内部の legacy 非対称は意図的に Round2 先送り (commit b5ea676 のコメント)。現行で再確認: dedup.py:393 check_duplicate は same_cluster=[fp for fp in existing if ... and not fp.legacy_pass] で legacy 除外。一方 cluster_strategies (L282-297) は rankable=members 全部を含め capped=ranked[:max_per_cluster] で legacy も上位3件に含める。具体シナリオ: Gen41(legacy)+Gen65(legacy)+Gen87(non-legacy)+新規候補 Gen100 のクラスターで cluster_strategies は capped_members=[Gen41,Gen65,Gen87] を返し overflow=[]。一方 check_duplicate は same_cluster=[Gen87] で 1<3 -> cluster_full=False -> 新規 Gen100 は Gate 通過可。表示上は満員なのに実態は空きありという運用矛盾、Immutable 原則違反 (同じ概念が2箇所で異なる計算で評価される)。",
+      "evidence": [
+        "ATLAS/atlas/analyzer/dedup.py:282-297",
+        "ATLAS/atlas/analyzer/dedup.py:386-394",
+        "ATLAS/atlas/backtest/runner.py:838-840 (Round2 先送りコメント)",
+        "Git commit b5ea676 message (dedup.py legacy_pass 非対称削除は Round2 で検討)"
+      ],
+      "suggested_fix": "2案いずれも [change:spec]: (A) cluster_strategies 側を check_duplicate に合わせる — ranked[:max_per_cluster] を [m for m in ranked if not m.legacy_pass][:max_per_cluster] に変更、legacy は別フィールド legacy_occupants:list[str] に記録。capped_members は常に non_legacy のみ。(B) check_duplicate 側を cluster_strategies に合わせる — L389-393 の legacy 除外を撤廃。(B) は Gen41/65 の同一クラスターで正当な新規戦略が排除される既知副作用ありで devil-advocate 懸念と矛盾。推奨: (A)。tests/unit/test_cluster_cap_ranking.py に legacy 2件+non-legacy 1件で capped_members が non-legacy 1件のみアサート追加。"
+    },
+    {
+      "id": "QT-R2-005",
+      "carryover_from_round_1": false,
+      "severity": "high",
+      "status": "new",
+      "area": "backtest/wfa_efficiency_boundary_duplicate_conditions",
+      "title": "WFA efficiency_ratio の None 判定で mean_is_sharpe<=0 が is_below_valid と重複、境界丸めが事実上無効",
+      "description": "event_simulator.py:956-964 の efficiency 算出で (a) mean_is_sharpe<=0, (b) is_below_valid=mean_is_sharpe<WFA_MIN_VALID_IS_SHARPE(0.5), (c) 符号反転 の3条件いずれかで None 返却。WFA_MIN_VALID_IS_SHARPE=0.5>0 のため (a) は (b) の強化版で冗長。将来 WFA_MIN_VALID_IS_SHARPE を 0 以下にチューニング変更時に (a)(b) 乖離で bug 温床化。符号反転 (c) は is_sign!=0 and oos_sign!=0 and is_sign!=oos_sign で、is_sharpe=0.51(valid ギリギリ) oos_sharpe=-0.01(ほぼゼロだが負) の境界で efficiency=None -> Gate #12 失格。|x|<1e-10 の近似ゼロ丸めは 0.01 では効かず境界条件が厳しすぎる。",
+      "evidence": [
+        "ATLAS/atlas/backtest/event_simulator.py:953-964",
+        "ATLAS/atlas/config/defaults.py:79",
+        "CSR-R2-005/QT-R2-001 コメント (浮動小数点 == 0 比較対応の名残)"
+      ],
+      "suggested_fix": "(a) を削除し (b) のみで判定: if is_below_valid or (is_sign!=0 and oos_sign!=0 and is_sign!=oos_sign): efficiency=None。符号反転の丸めは oos_sharpe |x|<0.1 を近似ゼロ扱い (abs(x)<0.1 -> sign=0) に緩和検討 ([change:spec] 必要)。test_wfa_efficiency_low_is_sharpe.py に境界ケース (is=0.51, oos=-0.05) の期待値明示。"
+    },
+    {
+      "id": "QT-R2-006",
+      "carryover_from_round_1": false,
+      "severity": "high",
+      "status": "new",
+      "area": "backtest/secondary_period_no_loss_false_fail",
+      "title": "セカンダリ期間 gross_loss=0 無敗結果は PF=None -> Gate #14 強制 FAIL、本来最優良な戦略が失格",
+      "description": "event_simulator.py:745-749 は gross_loss=0 で profit_factor=None (P8-H1 修正後の無敗=統計不能扱い)。主期間では妥当だが runner.py:452-459 の Gate #14 は secondary_period_layer2.profit_factor が None のとき _check で必ず False。セカンダリ期間で全勝利 gross_loss=0 の戦略 (最も望ましい結果) が Gate #14 強制 FAIL。2019-2022 で少数トレード全勝ケース、特に取引頻度低い戦略 (年20件x4年=80件、Gate #7 境界) で起こり得る。None=未評価=FAIL の原則と『無敗=最良』の現実の衝突。",
+      "evidence": [
+        "ATLAS/atlas/backtest/event_simulator.py:745-749",
+        "ATLAS/atlas/backtest/runner.py:452-459",
+        "ATLAS/atlas/backtest/runner.py:391-396"
+      ],
+      "suggested_fix": "_compute_metrics() の pf 計算を if gross_loss>0: pf=gp/gl elif gross_profit>0 and len(wins)>=MIN_WINS_FOR_PERFECT: pf=sentinel_max else: pf=None に拡張し無敗かつ十分なサンプルは最大値返す。または Gate #14 側で secondary_pf is None and total_trades>=GATE_MIN_SECONDARY_TRADES and total_return_pct>0 の特例通過を認める。どちらも [change:spec]。ゴールデンテストに gross_loss=0 ケース追加。"
+    },
+    {
+      "id": "QT-R2-007",
+      "carryover_from_round_1": false,
+      "severity": "high",
+      "status": "new",
+      "area": "backtest/oos_is_pf_ratio_is_below_valid_bypass",
+      "title": "Gate #4 OOS/IS PF ratio は IS Sharpe 低ノイズ域でも PF で判定され WFA Gate の未評価=FAIL と非対称",
+      "description": "event_simulator.py:956-972 では mean_is_sharpe<WFA_MIN_VALID_IS_SHARPE のとき efficiency/drift を None 強制し Gate #5 Strategy Drift / Gate #12 WFA Efficiency を未評価=FAIL にする保護がある。一方 _compute_oos_is_ratio (result_parser.py:167-190) は is_pf=l2.is_profit_factor_walks; if is_pf is None or is_pf<=0: return None; return oos_pf/is_pf と IS PF のみで判定し IS Sharpe のノイズ域チェックなし。結果 IS Sharpe=0.1(実質ランダム)の戦略でも IS PF=1.01(かろうじて黒字)なら OOS/IS PF ratio が算出され OOS PF 0.72/IS PF 1.01=0.713 で Gate #4 (>=0.7) 通過可。WFA Gate 群と非対称に IS 側の統計ノイズでも Gate #4 だけ通過可能。CLAUDE.md L87 Immutable 原則の『同等条件下で同じ判定』に反する。",
+      "evidence": [
+        "ATLAS/atlas/backtest/result_parser.py:167-190",
+        "ATLAS/atlas/backtest/event_simulator.py:956-972",
+        "ATLAS/atlas/config/defaults.py:79"
+      ],
+      "suggested_fix": "_compute_oos_is_ratio を拡張して l2.mean_is_sharpe (要 Layer2Result 追加) を読み mean_is_sharpe<WFA_MIN_VALID_IS_SHARPE なら None 返却。または is_pf の下限条件を is_pf is None or is_pf<=GATE_MIN_PROFIT_FACTOR (1.2 未満は IS でも失格) にして WFA efficiency 保護と整合化。Layer2Result に mean_is_sharpe_walks フィールド追加 (wfa.mean_is_sharpe は _aggregate_wfa_walks L944 で既算出、未公開なだけ)。"
+    }
+  ]
+}

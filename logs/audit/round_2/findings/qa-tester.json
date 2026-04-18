@@ -1,0 +1,105 @@
+{
+  "agent": "qa-tester",
+  "round": 2,
+  "audit_date": "2026-04-18",
+  "commits_reviewed": ["de75c08", "35612c5", "e4ef35e", "d99a425"],
+  "findings": [
+    {
+      "id": "QT-002",
+      "severity": "high",
+      "carryover_from_round_1": true,
+      "status": "partially_resolved",
+      "area": "tests/unit/",
+      "title": "PTRC _check_max_daily_loss の Pre-Trade 単体テストが依然として存在しない",
+      "description": "_check_per_pair_exposure は tests/unit/test_phase3_platform.py::TestPerPairExposure で PASS/REJECT/異ペア の3シナリオがカバーされており Round 1 指摘の半分は解消済み。しかし _check_max_daily_loss を PreTradeRiskControl.evaluate() に daily_realized_pnl=-1,000,000 (10% 超過) の RiskState を渡して approved=False を確認するテストが存在しない。test_phase3_risk_execution.py の daily_loss テストは PostTradeRiskControl（PTRC-Post）を対象としており、Pre-Trade PTRC とは別コードパスである。この差異により、_check_max_daily_loss 内の loss_ratio 計算または passed=not is_losing or loss_ratio<=limit の論理バグが本番まで検出されないリスクが残る。",
+      "evidence": [
+        "trading_platform/core/risk_engine/ptrc.py:277-301 (_check_max_daily_loss 実装)",
+        "tests/unit/test_phase3_risk_execution.py:293-319 (PostTrade のみ)",
+        "tests/unit/test_phase3_platform.py:104-208 (PER_PAIR_EXPOSURE はカバー済み、MAX_DAILY_LOSS はなし)"
+      ],
+      "suggested_fix": "tests/unit/test_ptrc_daily_loss.py を新規作成し (1) daily_realized_pnl=-100_001 / balance=1_000_000 で REJECT、(2) daily_realized_pnl=-50_000 で PASS、(3) daily_unrealized_pnl が daily_realized_pnl に加算されて合計が閾値超過で REJECT の3ケースを ptrc._check_max_daily_loss 直接呼び出しでアサートする。"
+    },
+    {
+      "id": "QT-003",
+      "severity": "high",
+      "carryover_from_round_1": true,
+      "status": "not_resolved",
+      "area": "tests/integration/test_signal_flow.py",
+      "title": "E2Eフローテストのゼロシグナルサイレントパスが Round 1 後も未修正",
+      "description": "test_full_signal_to_fill_flow は 200 本の合成乱数データを投入し、fills_completed=0 の場合も assert feature_store.bar_count == 200 のみで CI グリーンになる（lines 271-276）。Round 1 修正でこのテストには一切手が加わっていない。現状でも _ForceLong 戦略フィクスチャや deterministic OHLCV データへの切り替えは実施されておらず、PTRC → Order → Fill 経路がゼロシグナルで丸ごとスキップされた場合に CI は偽緑を返す。",
+      "evidence": [
+        "tests/integration/test_signal_flow.py:271-276",
+        "commits de75c08/35612c5/e4ef35e/d99a425 のいずれも test_signal_flow.py に触れていない"
+      ],
+      "suggested_fix": "テスト末尾に assert fills_completed >= 1, f'E2Eフローが一度も完了しなかった (fills={fills_completed})' を追加する。または EMAクロスを必ず 1 回発生させる決定論的データフィクスチャ（200本目で条件成立を保証）を使用する。"
+    },
+    {
+      "id": "QT-006",
+      "severity": "high",
+      "carryover_from_round_1": true,
+      "status": "not_resolved",
+      "area": "tests/integration/ tests/fault/",
+      "title": "再起動後の SUBMITTED 注文→OANDA 照合（Order Reconciliation）テストが依然として存在しない",
+      "description": "tests/integration/test_state_recovery.py (d99a425) では Orders が OrderManager に復元されることを確認しているが、復元された SUBMITTED 状態の注文が PositionReconciler を通じて OANDA 側の実際の約定状態と照合されるシナリオのテストがない。test_reconnect_cycle.py は接続断→再接続の reconcile をテストしているが、プロセス再起動を模倣した 「新インスタンス生成 → StateStore から SUBMITTED 注文を復元 → PositionReconciler.reconcile() でブローカーと突き合わせ → ゾンビ注文検知」のフローはいずれのファイルにも存在しない。docs/SHARED_CONTRACT.md に明記されたフローであり、未検証リスクが継続している。",
+      "evidence": [
+        "tests/integration/test_state_recovery.py:120-160 (復元は確認、reconcile は未呼び出し)",
+        "tests/fault/test_reconnect_cycle.py (プロセス再起動シミュレーションなし)",
+        "trading_platform/CLAUDE.md:130-132 (Order Reconciliation を定期実行と明記)"
+      ],
+      "suggested_fix": "tests/integration/test_order_reconciliation_after_restart.py を新規作成し、StateStore に SUBMITTED 状態の注文を保存後、新規 ExecutionCoordinator インスタンスで recover_state() を呼び、続けて PositionReconciler.reconcile() で MockOANDABroker (空返却) と照合し、SUBMITTED 注文がゾンビとして検知されることをアサートする。"
+    },
+    {
+      "id": "QT-008",
+      "severity": "high",
+      "carryover_from_round_1": false,
+      "area": "tests/unit/test_coordinator_snapshot.py:112",
+      "title": "test_coordinator_snapshot_writer_called_on_fill の order_id アサートが常時通過する偽緑",
+      "description": "Round 1 追加テスト (e4ef35e) の test_coordinator_snapshot_writer_called_on_fill 内で order_id 検証を行う assert 式が `assert call_args.args[0].startswith('O-') or call_args.args[0]` となっている。Python では非空文字列は truthy なため、右辺 `or call_args.args[0]` が常に True を返し、左辺の startswith 評価結果に関わらずアサートが通過する。order_id が 'O-' から始まらない値（空文字列・None・UUID形式等）であっても CI は偽緑になる。コメントに 'order_id is present' と書かれているが、実質的に order_id の値を全く検証していない。",
+      "evidence": [
+        "tests/unit/test_coordinator_snapshot.py:112",
+        "assert call_args.args[0].startswith('O-') or call_args.args[0]  # order_id is present"
+      ],
+      "suggested_fix": "assert call_args.args[0] を assert call_args.args[0].startswith('O-') に修正する。または、_DummyBroker.submit() が返す order_id の実際の形式に合わせた具体的なアサート（例: assert isinstance(call_args.args[0], str) and len(call_args.args[0]) > 0）を使用する。"
+    },
+    {
+      "id": "QT-009",
+      "severity": "high",
+      "carryover_from_round_1": false,
+      "area": "tests/fault/test_redis_disconnect.py",
+      "title": "KillSwitch 発動時の Redis 切断サイレント継続（except BLE001）がテストされていない",
+      "description": "circuit_breaker.py の KillSwitch.activate() では StateStore への save_account_risk_state 失敗を except Exception でキャッチし logger.error のみで継続する（line 322）。つまり KS 発動が Redis 切断と同時に起きた場合、KS=True の永続化が失敗してもエラーログのみで処理が続く。test_redis_disconnect.py は save_position / save_risk_state の切断テストをカバーしているが、save_account_risk_state（KS 発動状態を含む）の切断シナリオがテストに含まれていない。プロセス再起動時に KS=True が復元されない critical シナリオが未検証である。",
+      "evidence": [
+        "trading_platform/core/risk_engine/circuit_breaker.py:319-322 (activate 内 save_account_risk_state の except BLE001)",
+        "tests/fault/test_redis_disconnect.py (save_account_risk_state の接続断テストなし)"
+      ],
+      "suggested_fix": "test_redis_disconnect.py に test_save_account_risk_state_raises_on_disconnect を追加し、FaultRedisBackend が接続断状態で save_account_risk_state が ConnectionError を raise することを確認する。さらに KillSwitch.activate() 内での例外キャッチが logger.error を呼び出すことを mock ベースで確認するテストを追加する。"
+    },
+    {
+      "id": "QT-010",
+      "severity": "high",
+      "carryover_from_round_1": false,
+      "area": "trading_platform/core/execution_engine/coordinator.py:182",
+      "title": "_maybe_reset_daily の asyncio.create_task 永続化が非同期完了保証なしで fire-and-forget",
+      "description": "coordinator.py の _maybe_reset_daily() は日次リセット後に asyncio.create_task(self._persist_risk_state()) を呼ぶ（line 182）。create_task は呼び出しコルーチンを即返しタスクを非同期にスケジュールするため、タスク完了前に次の _on_signal が実行されたりプロセス終了が発生した場合、リセット後の RiskState（daily_pnl=0）が StateStore に保存されない可能性がある。この場合、再起動後に旧日付の daily_pnl (-N万円) が復元されて PTRC の MAX_DAILY_LOSS が誤判定する。テストコードにこの fire-and-forget 挙動をカバーするシナリオが存在しない。また TaskGroup での例外伝播がなく、永続化失敗がサイレントになる。",
+      "evidence": [
+        "trading_platform/core/execution_engine/coordinator.py:182 (asyncio.create_task)",
+        "tests/ 全体に _maybe_reset_daily + 永続化完了 の検証なし"
+      ],
+      "suggested_fix": "_persist_risk_state() を直接 await する（_maybe_reset_daily を async にする）か、create_task の戻り値を保持して asyncio.shield または shutdown 時に await する。テストでは mock state_store.save_risk_state の呼び出し回数を asyncio.sleep(0) 後に確認することで非同期完了を検証できる。"
+    },
+    {
+      "id": "QT-011",
+      "severity": "high",
+      "carryover_from_round_1": false,
+      "area": "tests/fault/test_oanda_api_fault.py:149-170",
+      "title": "QT-001 未修正: test_partial_failure_probability の確率的挙動アサートが欠如",
+      "description": "Round 1 で指摘した QT-001 と同一問題。Round 1 修正コミット群 (de75c08/35612c5/e4ef35e/d99a425) のいずれも test_oanda_api_fault.py に変更を加えていない。test_partial_failure_probability は random.seed(42) 固定で 10 回試行しながら assert len(results) == 10 のみであり、successes/failures の値が計算されるがアサートされない。fail_probability=0.5 の FaultOANDAClient が正しく動作しなくても CI は通過する偽緑テストのままである。本 Round でも High として再掲する。",
+      "evidence": [
+        "tests/fault/test_oanda_api_fault.py:149-170",
+        "successes, failures が計算されているがアサートなし",
+        "de75c08/35612c5/e4ef35e/d99a425 のいずれも test_oanda_api_fault.py を変更していない"
+      ],
+      "suggested_fix": "assert 1 <= successes <= 9 を追加する。seed=42 固定の場合 successes の正確な値は決定論的であるため assert successes == N のハード値でもよい（先に実際の値を計算して確認すること）。"
+    }
+  ]
+}

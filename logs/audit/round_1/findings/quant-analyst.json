@@ -1,0 +1,73 @@
+{
+  "agent": "quant-analyst",
+  "findings": [
+    {
+      "id": "QA-001",
+      "severity": "high",
+      "area": "backtest/sharpe_annualization",
+      "title": "L1 (vectorbt) と L2 (event_simulator) で Sharpe の年率化基底が乖離している",
+      "description": "L2 event_simulator._compute_metrics は BARS_PER_YEAR (FX 5日週: H1=6240, M15=24960) を使って手動年率化する一方、L1 _run_vectorbt_portfolio では vectorbt の pf.sharpe_ratio() を呼ぶだけで、freq='1h' に対する year_freq を設定していない。vectorbt のデフォルト year_freq='365 days' は H1 で 8760 バー/年とみなすため、同じリターン系列でも L1 Sharpe は L2 Sharpe より sqrt(8760/6240) ≒ 1.184x 膨張する。M15 では sqrt(35040/24960) ≒ 1.185x。これにより (1) L1_MIN_SHARPE=0.3 のスクリーニングが実効的に厳しい側にぶれる、(2) パラメータ感度分析 (Sharpe CV ベース) がノイズ込みで推定される、(3) GATE_MAX_L1_L2_DRIFT=0.30 警告が constant な Sharpe 系統バイアスで膨らむ、という副次的影響を生む。CLAUDE.md の Immutable Gate Protection Protocol は『閾値が参照するメトリクスの計算ロジック』も Immutable と定義しており、L1/L2 で異なる基底の Sharpe を使うこと自体が原則違反。",
+      "evidence": [
+        "ATLAS/atlas/backtest/vectorbt_engine.py:582-598",
+        "ATLAS/atlas/backtest/vectorbt_engine.py:629",
+        "ATLAS/atlas/backtest/event_simulator.py:801-818",
+        "ATLAS/atlas/config/defaults.py:211-221"
+      ],
+      "suggested_fix": "_run_vectorbt_portfolio() 内で `vbt.settings.returns['year_freq'] = f'{BARS_PER_YEAR[timeframe]} days'` 相当の設定、もしくは pf.sharpe_ratio() の代わりに returns 系列を取得して L2 と同じ式 (mean*N / std*sqrt(N)) で算出する。ゴールデンテスト (tests/golden/test_vectorbt_engine_golden.py) を追加し、既知 returns で L1 と L2 の Sharpe が ±0.1% で一致することをアサート。"
+    },
+    {
+      "id": "QA-002",
+      "severity": "high",
+      "area": "backtest/gate#13_excess_return",
+      "title": "Gate #13 B&H 超過リターンの market_exposure 正規化が低エクスポージャ戦略を構造的に有利にする",
+      "description": "event_simulator.py:881 の `bh_excess_return_pct = total_return_pct - bh_return_pct * exposure` は、戦略が市場に居た時間でのみ B&H と比較するという理屈だが、現実の比較では『同じ時間軸でレバレッジを掛けない B&H』に対する超過収益でなければ α 検証にならない。実例 ATLAS-2026-0417-003 (long_only, USD_JPY M15): total_return=231.72%, bh_return=36.94%, exposure=0.1155 → bh_excess = 231.72 - 36.94×0.1155 = 227.45% という極端な値が得られ、Gate #13 を trivially 通過する。ストラテジが小ロットで『勝った時だけ資金を当てる』形であれば、複利で全期間に占める運用時間が短くても累積リターンを膨らませることが可能で、exposure scaling は実質的に B&H のハンデキャップを与える形になる。CLAUDE.md L113 脚注の意図 (低エクスポージャ戦略への公平性) と相反する副作用。さらに exposure 不明時に 1.0 にフォールバックする (event_simulator.py:880) ため、旧フォーマットの戦略は過去より厳しく、新フォーマットは過去より緩く判定されるという schema 跨ぎの非対称も生じる。",
+      "evidence": [
+        "ATLAS/atlas/backtest/event_simulator.py:868-881",
+        "ATLAS/atlas/config/defaults.py:52",
+        "ATLAS/strategies/ATLAS-2026-0417-003/backtest/result.json (total_return=231.72, bh_excess=227.46, exposure=0.1155)",
+        "ATLAS/strategies/ATLAS-2026-0417-013/backtest/result.json (total_return=23.74, bh_excess=22.65, exposure=0.1481)"
+      ],
+      "suggested_fix": "Gate #13 を以下のいずれかへ移行: (a) Sharpe 比較 ((strategy_sharpe - bh_sharpe) > 0)、(b) exposure 正規化を **戦略リターン側に適用** (return / exposure ≥ bh_return)、または (c) 補完指標として『リスク同等化レバレッジ B&H』との比較を導入。少なくとも exposure < 0.20 の戦略については Gate #13 を Sharpe ベースに切り替えるべき。fallback 1.0 の挙動も廃止し、exposure 取れない結果は新形式で再 BT を要求 (Gate 未評価＝FAIL)。"
+    },
+    {
+      "id": "QA-003",
+      "severity": "high",
+      "area": "backtest/gate_bypass",
+      "title": "重複検出 (cluster cap) が overall_passed を変更しない — 警告のみで実質バイパス可能",
+      "description": "runner.py:834-851 の重複検出ブロックは `result.overall_passed` が True のときのみ呼ばれ、`dup.is_duplicate=True` の場合でも logger.warning と duplicate_check 記録のみを行い、overall_passed を False に上書きしない。結果として CLUSTER_CAP_PER_GROUP=3 のキャップを超えた 4 件目の同一クラス×通貨×TF 戦略が Gate PASS したまま表示され、FTS への自動投入対象になる。CLAUDE.md 第120行『上限到達時は check_duplicate() が is_duplicate=True を返し、新規戦略のGate PASSを阻止する』という仕様と実装が乖離している。さらに check_duplicate (dedup.py:389-394) は legacy_pass 戦略を除外して same_cluster をカウントするため、cluster_strategies の capped_members ロジックとも非対称（同一クラスターで cluster_strategies は legacy 込みで cap、check_duplicate は legacy 除外で cap）。",
+      "evidence": [
+        "ATLAS/atlas/backtest/runner.py:834-851",
+        "ATLAS/atlas/analyzer/dedup.py:389-407",
+        "ATLAS/atlas/analyzer/dedup.py:282-298",
+        "ATLAS/CLAUDE.md:120"
+      ],
+      "suggested_fix": "runner.py:838-845 で `dup.is_duplicate=True` のときに `result.overall_passed = False` と `result.gate_check['failed_conditions'].append('Cluster Cap (Duplicate)')` を追加。check_duplicate と cluster_strategies の legacy 扱いを統一する (legacy_pass=True を両方で除外する、もしくは両方で含める)。Gate 仕様の方が legacy 除外なので、cluster_strategies 側も整合するよう変更する。"
+    },
+    {
+      "id": "QA-004",
+      "severity": "high",
+      "area": "analyzer/metrics_path_resolution",
+      "title": "compute_metrics() の strategies/ パス解決が CWD 依存で runner.py の _strategies_dir() と乖離している",
+      "description": "atlas/analyzer/metrics.py:26 の `Path('strategies') / generation_id / 'backtest' / 'result.json'` は **常に CWD 相対**で解決される。一方 runner.py:43-56 の `_strategies_dir()` は ATLAS ルート絶対パス優先 (CWD 依存排除を意図した第7次監査 M-3 対策) で解決する。Skill が CWD=ATLAS で実行する場合は両者一致するが、テスト・CLI を ATLAS 親ディレクトリ (`C:/data/制作物/claude/`) や任意ディレクトリから走らせると、BT は走るが metrics 算出だけ FileNotFoundError で落ちる、もしくは存在しない戦略 ID で空メトリクスが返るという非対称が起きる。同じ generation_id が異なる結果を返し得る点で再現性原則に反する。",
+      "evidence": [
+        "ATLAS/atlas/analyzer/metrics.py:26",
+        "ATLAS/atlas/backtest/runner.py:43-56",
+        "ATLAS/atlas/backtest/runner.py:866 (save_backtest_result も _strategies_dir 経由で書き込む)"
+      ],
+      "suggested_fix": "metrics.py に runner.py と同一の `_strategies_dir()` を import / 共有させ、ATLAS ルート絶対パスを優先解決させる。合わせて `atlas/common/paths.py` のような共通モジュールに切り出して、戦略パス解決ロジックを正規化する。"
+    },
+    {
+      "id": "QA-005",
+      "severity": "high",
+      "area": "backtest/vectorbt_pf_inf",
+      "title": "L1 vectorbt の Profit Factor が gross_loss=0 で float('inf') を返し、L2 の None と非対称",
+      "description": "vectorbt_engine.py:618-620 で `profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')` を返す。一方 event_simulator.py:745-749 の L2 は同じ条件で None を返す (P8-H1 修正)。L1 の inf は line 640 の `round(profit_factor, 4)` で `inf` のまま JSON シリアライズされ得る (Pydantic は float なので inf を許容するが JSON 標準としては非標準) し、Layer1Result.profit_factor を読む scorer / weakness_detector / log 出力で異常な比較が走る。直接 Gate には影響しないが (L2 のみ参照)、L1 通過判定 `pf >= L1_MIN_PROFIT_FACTOR=0.8` (line 821) で inf > 0.8 として全勝戦略を無条件通過させ、その先の感度分析・WFA で計算量を浪費する。さらに JSON inf は標準 json.load では NaN/Inf を許容するが下流ツール (web ダッシュボード等) を破壊する可能性あり。",
+      "evidence": [
+        "ATLAS/atlas/backtest/vectorbt_engine.py:617-620",
+        "ATLAS/atlas/backtest/vectorbt_engine.py:640",
+        "ATLAS/atlas/backtest/event_simulator.py:740-749"
+      ],
+      "suggested_fix": "vectorbt_engine.py:618 を `profit_factor = gross_profit / gross_loss if gross_loss > 0 else None` に修正し L2 と整合。L1 の早期 reject (line 821) でも `pf is None or pf < L1_MIN_PROFIT_FACTOR` の条件にする (None=未評価=不合格)。ゴールデンテストに gross_loss=0 ケースを追加。"
+    }
+  ]
+}

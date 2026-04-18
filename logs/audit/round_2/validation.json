@@ -1,0 +1,655 @@
+{
+  "validation_meta": {
+    "round": 2,
+    "validator": "devils-advocate",
+    "validation_date": "2026-04-18",
+    "commits_available": [
+      "de75c08",
+      "35612c5",
+      "e4ef35e",
+      "d99a425",
+      "b5ea676"
+    ],
+    "agents_reviewed": [
+      "quant-analyst",
+      "platform-architect",
+      "risk-execution-engineer",
+      "data-engineer",
+      "qa-tester",
+      "devops-monitor",
+      "code-safety-reviewer"
+    ]
+  },
+  "per_finding_validations": [
+    {
+      "finding_id": "QA-001",
+      "agent": "quant-analyst",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "vectorbt_engine.py:591 year_freq未設定確認。L1=8760/L2=6240乖離でsqrt(8760/6240)=1.184x系統バイアス実証"
+    },
+    {
+      "finding_id": "QA-002",
+      "agent": "quant-analyst",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "event_simulator.py:868-881のbh_excess=total_return-bh_return*exposure確認。低エクスポージャ戦略の構造的有利化は設計欠陥"
+    },
+    {
+      "finding_id": "QA-004",
+      "agent": "quant-analyst",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "metrics.py:26はCWD相対、runner.py:43-56は_ATLAS_ROOT絶対優先。非対称確認済み"
+    },
+    {
+      "finding_id": "QA-005",
+      "agent": "quant-analyst",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "vectorbt_engine.py:617-620のfloat(inf)とevent_simulator.py:745-749のNone非対称確認"
+    },
+    {
+      "finding_id": "QT-R2-001",
+      "agent": "quant-analyst",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "event_simulator.py:1381-1385でstep=len(eq)//500間引き確認。result_parser.py:270-310が間引き後系列でVaR算出。sqrt(199)=14.1x歪み"
+    },
+    {
+      "finding_id": "QT-R2-002",
+      "agent": "quant-analyst",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "result_parser.py:47-53のfill_rate=trades/len(equity_curve)確認。808/501=1.612 vs 真値0.0081の約200倍過大。weakness_detector誤警告連鎖確認"
+    },
+    {
+      "finding_id": "QT-R2-003",
+      "agent": "quant-analyst",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "vectorbt_engine.py:632のpf.max_drawdown()負値(-0.0198)確認。event_simulator.py:829は正値。符号非対称確認"
+    },
+    {
+      "finding_id": "QT-R2-004",
+      "agent": "quant-analyst",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "dedup.py:282-297とL386-394のlegacy処理非対称確認。cluster_strategiesはlegacy含むranked[:3]、check_duplicateはlegacy除外"
+    },
+    {
+      "finding_id": "QT-R2-005",
+      "agent": "quant-analyst",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "event_simulator.py:953-964の重複条件確認。mean_is_sharpe<=0はis_below_validの部分集合で冗長。境界ケース実害は限定的",
+      "severity_adjusted_to": "medium"
+    },
+    {
+      "finding_id": "QT-R2-006",
+      "agent": "quant-analyst",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "event_simulator.py:745-749のgross_loss=0でpf=None確認。runner.py:452-459のGate#14がNoneで強制FAIL。無敗戦略失格の設計矛盾"
+    },
+    {
+      "finding_id": "QT-R2-007",
+      "agent": "quant-analyst",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "result_parser.py:167-190のOOS/IS PF ratioにIS Sharpeノイズ域チェックなし確認。Gate#4のみWFA Gate群と非対称に保護欠如"
+    },
+    {
+      "finding_id": "PA-R2-006",
+      "agent": "platform-architect",
+      "original_severity": "critical",
+      "validated": true,
+      "validation_reason": "redis_store.py:43-80でInMemoryBackendのみ存在、RedisBackend未実装確認。main.py:311のStateStore()無引数でInMemoryBackend固定。KS状態が再起動で毎回リセット"
+    },
+    {
+      "finding_id": "PA-001",
+      "agent": "platform-architect",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "circuit_breaker.py:125のRiskAlertEvent発行にcorrelation_id引数なし確認。6箇所全て同様"
+    },
+    {
+      "finding_id": "PA-002",
+      "agent": "platform-architect",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "settings.py:37のoanda_api_key: str確認。SecretStr使用0件確認"
+    },
+    {
+      "finding_id": "PA-005",
+      "agent": "platform-architect",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "memory_adapter.py:84-86の_running=False時silent drop早期return確認。stop()でrunning先倒しからdrainの窓が存在"
+    },
+    {
+      "finding_id": "PA-R2-007",
+      "agent": "platform-architect",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "events.py:79,175,261等にConfigDict設定なし確認。extra=forbidはfx_trading_system全体で0件"
+    },
+    {
+      "finding_id": "PA-R2-008",
+      "agent": "platform-architect",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "loader.py:579-584のfinally: sys.modules.pop(module_name, None)を確認。成功パスでもモジュール削除。pickle/issubclass失敗リスク実在"
+    },
+    {
+      "finding_id": "PA-R2-009",
+      "agent": "platform-architect",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "memory_adapter.py:114-133とredis_adapter.py:407-427でhandlerごとにcreate_task無制限生成確認。backpressure機構なし"
+    },
+    {
+      "finding_id": "PA-R2-010",
+      "agent": "platform-architect",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "settings.py:154-160のsnapshot_log_path=Path(logs/trade_context/snapshots.jsonl)相対パス確認"
+    },
+    {
+      "finding_id": "PA-R2-011",
+      "agent": "platform-architect",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "main.py:536-550でevent_bus->recover->health_check.startの順序確認。recover中はhealthcheck未起動"
+    },
+    {
+      "finding_id": "PA-R2-012",
+      "agent": "platform-architect",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "redis_adapter.py:80-81のfallback_seq_genとRedis INCR混在確認。切断->再接続でseq逆転の潜在欠陥"
+    },
+    {
+      "finding_id": "RE-003",
+      "agent": "risk-execution-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "ptrc.py:123-141のevaluate() 7gate配列にspread checkなし確認。PTRCCheckTypeにSPREAD_GUARD未定義確認"
+    },
+    {
+      "finding_id": "RE-004",
+      "agent": "risk-execution-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "circuit_breaker.py:288-425の_activate()にclose_trade呼び出しなし確認。KS発動後もオープンポジションが損益変動継続"
+    },
+    {
+      "finding_id": "RE-005",
+      "agent": "risk-execution-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "coordinator.py:643-675の3関数がtry/except+logger.errorのみのsilent swallow確認。Prometheus/RiskAlertEvent配線なし"
+    },
+    {
+      "finding_id": "RE-007",
+      "agent": "risk-execution-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "ptrc.py:180-198のfat finger checkがunits閾値のみ確認。HARD_LIMITSにmax_order_notional_*未定義確認"
+    },
+    {
+      "finding_id": "RE-R2-010",
+      "agent": "risk-execution-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "fill_processor.py:48の_processed_fills set in-memory only確認。coordinator.py:524-641のrecover_stateで_processed_fills復元なし確認"
+    },
+    {
+      "finding_id": "RE-R2-011",
+      "agent": "risk-execution-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "coordinator.py:486-522でaction_type==kill_switchのみ接続、entry_stop/strategy_pause/size_limitはlogger.warningのみ確認"
+    },
+    {
+      "finding_id": "RE-R2-012",
+      "agent": "risk-execution-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "ptrc_post.py:167-182のremaining_ratio<=0でkill_switch action発行確認。circuit_breaker.py:262-270はkill_switch_daily_loss=0.15要求。risk.py:184,199でmax_daily_loss=0.10/kill_switch_daily_loss=0.15の5%ギャップ確認"
+    },
+    {
+      "finding_id": "RE-R2-013",
+      "agent": "risk-execution-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "coordinator.py:688-698のused_margin=abs(quantity)*avg_entry_price*0.04でCurrencyConverter未使用確認。0.04ハードコード二重定義確認"
+    },
+    {
+      "finding_id": "RE-R2-014",
+      "agent": "risk-execution-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "broker_gateway.py:115の_attempts dict[str,int]が永続化なし確認。order_manager.py:76-100の_cleanup_terminal_ordersが_attemptsに触れないことを確認"
+    },
+    {
+      "finding_id": "RE-R2-015",
+      "agent": "risk-execution-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "coordinator.py:184-208の_on_signal冒頭にdedup checkなし確認。order_manager.py:62-74の_generate_client_order_idが毎回新ID生成"
+    },
+    {
+      "finding_id": "DE-R2-009",
+      "agent": "data-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "PA-R2-006と同根原因の重複指摘。redis_store.py:43-80でInMemoryBackendのみ実装、RedisStateBackend未実装確認",
+      "duplicate_of": "PA-R2-006"
+    },
+    {
+      "finding_id": "DE-R2-010",
+      "agent": "data-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "client.py:545-596のget_candlesがretry/429/Retry-After尊重なし確認。candle_fetcher.py:164-192でfetch_errors+1のみ。Live発注直結の確定バー停止リスク"
+    },
+    {
+      "finding_id": "DE-R2-011",
+      "agent": "data-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "quality_engine.py:118-121のspread_check_mode defaultとDE-006と重複度高。live_store.py:562でtz情報無視のindex化確認",
+      "duplicate_of": "DE-006",
+      "severity_adjusted_to": "medium"
+    },
+    {
+      "finding_id": "DE-001",
+      "agent": "data-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "vectorbt_engine.pyとindicators.pyの二重実装確認。Parityテスト保護あり。DE-005との連動リスクあるが単独では即致命でない",
+      "severity_adjusted_to": "medium"
+    },
+    {
+      "finding_id": "DE-002",
+      "agent": "data-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "live_store.py:276-299にis_warmed_up相当メソッドなし確認。worker.py:292-356がbar_count無関係にgenerate_signal呼び出し。NaN->Noneのワンクッションあり",
+      "severity_adjusted_to": "medium"
+    },
+    {
+      "finding_id": "DE-003",
+      "agent": "data-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "bar_builder.py:342-348のUTC epoch基準align確認。client.py:561-596のget_candles URLにalignmentTimezone/dailyAlignmentパラメータなし確認"
+    },
+    {
+      "finding_id": "DE-004",
+      "agent": "data-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "settings.py:112のtruth_source: str = tick_aggregation default確認。production.py等で上書きなし。main.py:280-299でtruth_sourceがBarBuilderに渡されることを確認"
+    },
+    {
+      "finding_id": "DE-005",
+      "agent": "data-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "live_store.py:66-74/stream_receiver.py:52-55/timeframes.py:23-32の3重定義確認。stream_receiver._TF_SECONDS.get(D1)NoneでbackfillスキップするバグをD1戦略で確認"
+    },
+    {
+      "finding_id": "DE-006",
+      "agent": "data-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "DE-R2-011と重複。quality_engine.py:118-121のspread_check_mode=disabledデフォルト確認。環境設定でのenforce機構なし",
+      "duplicate_of": "DE-R2-011",
+      "severity_adjusted_to": "medium"
+    },
+    {
+      "finding_id": "DE-007",
+      "agent": "data-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "DE-R2-009に統合。d99a425のfail-closed経路で一部緩和済み。redis_store.py自体にRetry-After尊重なし",
+      "duplicate_of": "DE-R2-009",
+      "severity_adjusted_to": "medium"
+    },
+    {
+      "finding_id": "DE-008",
+      "agent": "data-engineer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "live_store.py:408-431の_warn_trim_onceが初回一度のみWARN確認。BUFFER_SAFETY_FACTOR=50で通常戦略には非致命",
+      "severity_adjusted_to": "low"
+    },
+    {
+      "finding_id": "QT-002",
+      "agent": "qa-tester",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "ptrc.py:277-301の_check_max_daily_loss実装確認。test_phase3_platform.py:104-208でMAX_DAILY_LOSSテストなし。PostTradeのみカバー"
+    },
+    {
+      "finding_id": "QT-003",
+      "agent": "qa-tester",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "test_signal_flow.py:271-276でfills_completed=0でもbar_count==200のみでCI通過確認。ゼロシグナルサイレントパスが修正コミット後も未修正"
+    },
+    {
+      "finding_id": "QT-006",
+      "agent": "qa-tester",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "test_state_recovery.py:120-160で注文復元確認済みだがPositionReconciler.reconcile()呼び出しなし確認。ゾンビ注文検知フローのテストなし"
+    },
+    {
+      "finding_id": "QT-008",
+      "agent": "qa-tester",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "test_coordinator_snapshot.py:112のassert A.startswith(O-) or A確認。Pythonの短絡評価で右辺の非空文字列が常にTrueのため偽緑。order_idが空文字/None以外ならstartswith失敗でも通過"
+    },
+    {
+      "finding_id": "QT-009",
+      "agent": "qa-tester",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "circuit_breaker.py:319-322のactivate内save_account_risk_stateをexcept Exceptionでlogger.errorのみで継続確認。test_redis_disconnect.pyにsave_account_risk_state切断テストなし"
+    },
+    {
+      "finding_id": "QT-010",
+      "agent": "qa-tester",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "coordinator.py:182のasyncio.create_task(_persist_risk_state())確認。fire-and-forgetでタスク完了保証なし"
+    },
+    {
+      "finding_id": "QT-011",
+      "agent": "qa-tester",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "test_oanda_api_fault.py:149-170でsuccesses/failuresが計算されるがアサートなし確認。Round1修正コミット群がtest_oanda_api_fault.pyに無変更"
+    },
+    {
+      "finding_id": "DO-001",
+      "agent": "devops-monitor",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "main.py:403-480の_build_probers()にStrategyWorker/ExecutionCoordinator/PositionReconcilerのprober登録なし確認"
+    },
+    {
+      "finding_id": "DO-002",
+      "agent": "devops-monitor",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "main.py:459-476のoanda_proberがREST GETのみ確認。stream_receiverのis_connected/last_tick_timeプロパティ未実装確認"
+    },
+    {
+      "finding_id": "DO-003",
+      "agent": "devops-monitor",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "metrics.py:99-103のfx_open_positions Gauge定義確認。set_open_positions()相当メソッドなし。_gauges[positions]への書き込み0件"
+    },
+    {
+      "finding_id": "DO-005",
+      "agent": "devops-monitor",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "alerting_rules.yml全96行でfeature_staleness/FxFeatureStale関連ルールなし確認"
+    },
+    {
+      "finding_id": "DO-006",
+      "agent": "devops-monitor",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "position_reconciler.pyにMetricsCollector参照・注入コード0件確認。alerting_rules.ymlにFxPositionMismatchアラートルールなし"
+    },
+    {
+      "finding_id": "DO-R2-001",
+      "agent": "devops-monitor",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "subscribe(EventType.RISK_ALERT)呼び出しがfx_trading_system全体で0件をgrep確認。circuit_breaker.py:125でpublishのみ、handlerなし確認"
+    },
+    {
+      "finding_id": "DO-R2-002",
+      "agent": "devops-monitor",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "main.py:648-690の_recover_state_fail_closed()でlogger.critical+raiseのみ、RiskAlertEvent publishなし確認。state_recovery_skip.mdが未存在確認"
+    },
+    {
+      "finding_id": "DO-R2-003",
+      "agent": "devops-monitor",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "snapshot_writer.py:40-41,82-93のfailure_count/persisted_countがインスタンス変数のみ確認。MetricsCollectorにfx_snapshot_persist_failure相当なし確認"
+    },
+    {
+      "finding_id": "DO-R2-004",
+      "agent": "devops-monitor",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "metrics.py:155,161,167でCounter name _total付き、195,206,211で付きなし混在確認。alerting_rules.ymlとの乖離あり。機能障害ではない",
+      "severity_adjusted_to": "medium"
+    },
+    {
+      "finding_id": "DO-R2-005",
+      "agent": "devops-monitor",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "dashboard/app.py:1-184に認証コード0行確認。main.py:886-901の/risk/エンドポイントに認証なし。現状localhost限定運用では即致命でない",
+      "severity_adjusted_to": "medium"
+    },
+    {
+      "finding_id": "CS-001",
+      "agent": "code-safety-reviewer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "sandbox_builtins.py:29のlive __import__確認。syntax_checker.py:52-57のAST CheckがaliasBypass可能なことを確認"
+    },
+    {
+      "finding_id": "CS-002",
+      "agent": "code-safety-reviewer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "sandbox_runner.py:78-87のbaseline_rss未記録確認。_mem_poll():103-122がプロセス全体RSSと512MB比較、ベースライン差分なし確認"
+    },
+    {
+      "finding_id": "CS-003",
+      "agent": "code-safety-reviewer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "sandbox_runner.py:389-407の例外threshold=5(count>=5でFAIL)確認。4/200バーのTypeError/AttributeErrorでPASS+WARNING。レート基準なし確認"
+    },
+    {
+      "finding_id": "CS-004",
+      "agent": "code-safety-reviewer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "vectorbt_engine.py:362-376のNaN fallbackで_feature_compute_errorsへの追記確認。run_layer1:785-844で_feature_compute_errors未チェック確認"
+    },
+    {
+      "finding_id": "CS-005",
+      "agent": "code-safety-reviewer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "event_simulator.py:1222のlevel=logger.debug確認。INFO実行では全失敗が不可視。Gate11サイレント失敗確認"
+    },
+    {
+      "finding_id": "CS-007",
+      "agent": "code-safety-reviewer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "event_simulator.py:832-840のequity[0]<=0でtotal_return_pct=0.0返却確認。881行でbh_returnが負の場合にexcess正転によるGate13偽PASS可能確認"
+    },
+    {
+      "finding_id": "CS-008",
+      "agent": "code-safety-reviewer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "event_simulator.py:516-518,538,585-590,598,607のon_fill呼び出しで生dict確認。models.py:123-129のFillEventモデルが定義済みだが未使用"
+    },
+    {
+      "finding_id": "CS-009",
+      "agent": "code-safety-reviewer",
+      "original_severity": "high",
+      "validated": true,
+      "validation_reason": "models.py:62のTradeSignalと:84のStrategyConfigにConfigDict(extra=forbid)なし確認。Pydantic v2デフォルトはextra=ignore"
+    }
+  ],
+  "summary": {
+    "total": 67,
+    "validated": 67,
+    "rejected": 0,
+    "downgraded": 9,
+    "duplicates_merged": 4,
+    "critical_count": 1,
+    "high_count": 66,
+    "medium_count": 0,
+    "low_count": 0
+  },
+  "duplicate_links": [
+    {
+      "primary": "PA-R2-006",
+      "duplicate": "DE-R2-009",
+      "relationship": "同根原因: RedisStateBackend未実装。PA-R2-006はmain.py配線視点、DE-R2-009はredis_store.py実装視点で別角度から同一欠陥を指摘"
+    },
+    {
+      "primary": "DE-R2-011",
+      "duplicate": "DE-006",
+      "relationship": "DE-R2-011はDE-006(spread_check_mode disabled)にtimezone混在問題を追加した上位指摘。DE-006はDE-R2-011に統合"
+    },
+    {
+      "primary": "DE-R2-009",
+      "duplicate": "DE-007",
+      "relationship": "DE-007のRedis retry未実装はDE-R2-009(RedisBackend未実装)の下位論点。DE-007はDE-R2-009解決後に自動解消"
+    }
+  ],
+  "severity_adjustments": [
+    {
+      "finding_id": "QT-R2-005",
+      "from": "high",
+      "to": "medium",
+      "reason": "mean_is_sharpe<=0はis_below_validの部分集合で冗長。WFA Gate判定の最終出力には影響しない。境界ケースの厳しすぎる判定は実害あるが設計上の選択の余地があるレベル"
+    },
+    {
+      "finding_id": "DE-R2-011",
+      "from": "high",
+      "to": "medium",
+      "reason": "DE-006との重複度が高くtimezone問題はParity test未検出経路だが既存運用でのDST境界エラーは稀。DE-006と統合して追跡"
+    },
+    {
+      "finding_id": "DE-001",
+      "from": "high",
+      "to": "medium",
+      "reason": "Parityテストで数値一致が保護されており単独では即致命でない。DE-005修正後のフォローアップで対処可能"
+    },
+    {
+      "finding_id": "DE-002",
+      "from": "high",
+      "to": "medium",
+      "reason": "NaN->Noneシグナルによる発注抑止のワンクッションがあり完全無防備ではない。SHARED_CONTRACT TODO明記済みで追跡対象"
+    },
+    {
+      "finding_id": "DE-006",
+      "from": "high",
+      "to": "medium",
+      "reason": "DE-R2-011に統合。単独では環境設定の問題で実装バグではない"
+    },
+    {
+      "finding_id": "DE-007",
+      "from": "high",
+      "to": "medium",
+      "reason": "DE-R2-009に統合。d99a425のfail-closed経路で一部緩和済み"
+    },
+    {
+      "finding_id": "DE-008",
+      "from": "high",
+      "to": "low",
+      "reason": "BUFFER_SAFETY_FACTOR=50で通常戦略(period<200)には非致命。現状のATLAS生成戦略にperiod>400は存在しない"
+    },
+    {
+      "finding_id": "DO-R2-004",
+      "from": "high",
+      "to": "medium",
+      "reason": "prometheus_clientの自動_total付与で実際のmetric名は正しく生成される。alerting_rules.ymlとの乖離は混乱招くが機能障害ではない"
+    },
+    {
+      "finding_id": "DO-R2-005",
+      "from": "high",
+      "to": "medium",
+      "reason": "現状はlocalhost限定運用でWSL2環境。本番公開時のリスクだが現在の運用環境では即致命でない"
+    }
+  ],
+  "top5_recommendations": [
+    {
+      "rank": 1,
+      "finding_id": "PA-R2-006",
+      "agent": "platform-architect",
+      "severity": "critical",
+      "rationale": "RedisStateBackend未実装でプロセス再起動時にKS/daily_pnl/全ポジションが消失。RE-R2-010/RE-R2-011/RE-R2-012の前提インフラ欠陥であり修正しない限り他のRisk系修正が無意味化する。AioRedisBackend実装+main.py配線で中程度の実装量。",
+      "estimated_effort": "medium",
+      "blocks": [
+        "RE-R2-010",
+        "RE-R2-015",
+        "QT-009"
+      ]
+    },
+    {
+      "rank": 2,
+      "finding_id": "RE-R2-012",
+      "agent": "risk-execution-engineer",
+      "severity": "high",
+      "rationale": "PTRC-Post Level3がkill_switch actionを発行してもKillSwitch.check(15%)閾値に届かず10-15%損失帯で段階的保護が空白。RE-R2-011の配線漏れと合わせると事実上2段階(無制限->KS)に退化。force_activate追加のみで修正可能な低コスト高インパクト。",
+      "estimated_effort": "low",
+      "blocks": [
+        "RE-R2-011"
+      ]
+    },
+    {
+      "rank": 3,
+      "finding_id": "QT-R2-002",
+      "agent": "quant-analyst",
+      "severity": "high",
+      "rationale": "fill_rate=trades/equity_curve_len(500)による約200倍過大算出がweakness_detectorの改善指示を汚染。Gen42-55の53世代全敗の一因の可能性。result_parser.py:47-53の1行修正で解決でき将来のatlas-loopの改善方向性を正常化できる最小コスト最大波及修正。",
+      "estimated_effort": "low",
+      "blocks": [
+        "QT-R2-001"
+      ]
+    },
+    {
+      "rank": 4,
+      "finding_id": "QT-008",
+      "agent": "qa-tester",
+      "severity": "high",
+      "rationale": "assert A or BのPython短絡評価でorder_id検証が常時通過する偽緑テスト。Round1で追加されたテスト自体が品質保証機能を果たしていないCI自己汚染。1行修正で偽緑が解消しCIの信頼性が回復する。",
+      "estimated_effort": "low",
+      "blocks": []
+    },
+    {
+      "rank": 5,
+      "finding_id": "DE-004",
+      "agent": "data-engineer",
+      "severity": "high",
+      "rationale": "truth_source=tick_aggregationデフォルトで本番Live運用でもBTと異なるOHLC値で発注する。production.pyへの1行追加+main.py validator 1行で解決できる設定レベルの修正。data-engineer自身がRound2最優先修正として推奨。",
+      "estimated_effort": "low",
+      "blocks": [
+        "DE-003"
+      ]
+    }
+  ],
+  "overall_assessment": {
+    "agree_with_agents": true,
+    "critical_finding_confirmed": true,
+    "abandon_recommendation": false,
+    "primary_concern": "PA-R2-006(RedisStateBackend未実装)がFTS全状態管理の根幹を壊しておりRE系修正の効果を無効化する。Round2最優先修正として早急な対処が必要。QT-R2-002(fill_rate 200倍過大)はATLAS改善ループのフィードバック汚染として53世代全敗の一因である可能性があり即修正が望ましい。",
+    "agents_bias_detected": "DE agentがDE-007をDE-R2-009に統合・降格した自己評価修正は適切。DO-R2-004/DO-R2-005のhigh評価は若干の楽観バイアスあり(mediumが適切)。全体としてagents間の相互チェックで重大な見落としはなく67件の指摘品質は高い。"
+  }
+}

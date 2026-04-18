@@ -1,0 +1,158 @@
+{
+  "agent": "platform-architect",
+  "round": 2,
+  "audit_id": "AUDIT-2026-0416-002",
+  "focus": "event_bus / strategy_loader / config / startup_order / round_1_side_effects",
+  "findings": [
+    {
+      "id": "PA-R2-006",
+      "severity": "critical",
+      "area": "state_store / main.py startup wiring",
+      "title": "main.py の StateStore() が Redis backend 未指定で生成され、常に InMemoryBackend にフォールバック — Round 1 RE-001 で新設した状態復元経路が production 再起動後に必ず空で返る（KS も daily_pnl も復元されない）",
+      "description": "main.py:311 は `self._state_store = StateStore()` と backend 引数なしで呼び、StateStore.__init__ は引数 None のとき `InMemoryBackend()` を生成する（redis_store.py:102-103）。RedisBackend / AioRedisBackend 実クラスは redis_store.py に存在せず、InMemoryBackend のみ定義されている（Round 1 監査 FTS-R4-02 で data-engineer.json が同等指摘を出しており、Round 2 時点でも RedisBackend クラスはファイル内に存在しないことを Grep で確認済）。結果として: (a) 新規プロセスは常に空の InMemoryBackend を掴み、_recover_state_fail_closed → coordinator.recover_state で load_account_risk_state / load_risk_state / load_all_orders / load_all_positions がすべて None/[] を返す、(b) RE-001 が想定する 'クラッシュ→Redis から KS=True 復元→Hard Limit 防壁を保持' が構造的に成立せず、プロセス再起動で Kill Switch が毎回 False にリセットされる critical 欠陥、(c) fail-closed 側分岐は '復元失敗時' に発火する一方で、InMemory は 'データなし=正常' として返すため WARN/CRITICAL ログすら出ず、運用者に silently 劣化が露出しない。Round 1 の RE-001 修正（main.py:548-550, 648-690）は StateStore を配線するコードを追加したが Redis 接続を貼る箇所が抜けた。",
+      "evidence": [
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/main.py:310-311",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/data/state_store/redis_store.py:43-81",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/data/state_store/redis_store.py:94-103",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/main.py:648-690",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/execution_engine/coordinator.py:524-574"
+      ],
+      "suggested_fix": "redis_store.py に AioRedisBackend 実クラス（hset/hget/hgetall/delete/set/get/scan_keys を redis.asyncio で実装、SCAN COUNT 使用・KEYS 禁止）を追加する。main.py は settings.env == PRODUCTION のときのみ `backend = AioRedisBackend(url=self._settings.redis_url); await backend.ping()` を貼り、失敗したら fail-closed で起動拒否（skip_state_recovery=True 指定時のみ InMemory にフォールバック許容）。production で InMemoryBackend が掴まれたら loud CRITICAL + 起動 abort。contract テスト tests/integration/test_state_recovery_redis.py を追加（fakeredis 使用）。",
+      "carryover_from_round_1": false
+    },
+    {
+      "id": "PA-001",
+      "severity": "high",
+      "area": "event_bus / correlation_id",
+      "title": "RiskAlertEvent publish 5 箇所が依然 correlation_id=None のまま — Round 1 指摘から無修正、因果鎖が監査境界で必ず断絶する",
+      "description": "Round 1 で PA-001 として指摘した `RiskAlertEvent(source=..., level=..., alert_type=..., message=..., details=...)` への correlation_id 未付与が Round 2 でも完全に残存している。circuit_breaker.py:125 (circuit_breaker_tripped) / circuit_breaker.py:412 (kill_switch_activated) / position_reconciler.py:242 (position_discrepancy) / position_reconciler.py:252 (broker_trade_id_missing) / position_reconciler.py:265 (instrument_quantity_mismatch) / health_check.py:375 (oanda_connection_lost) の 6 箇所すべて kwargs に correlation_id を渡していない。Round 1 以降 RedisEventBus/InMemoryEventBus で導入した correlation_id LRU 直列化ロック（redis_adapter.py:387-405, memory_adapter.py:97-112）は cid=None の場合は並行起動パスに落ちる仕様のため、RiskAlert は常にロック外で扱われ、同一 KS イベントから派生する OrderEvent(CANCELLED) / FillEvent(cleanup) と順序保証なしに競合し得る。quality_engine.py:449 は bar.correlation_id を正しく継承（参考実装）。",
+      "evidence": [
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/risk_engine/circuit_breaker.py:125-137",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/risk_engine/circuit_breaker.py:412-425",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/execution_engine/position_reconciler.py:242-248",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/execution_engine/position_reconciler.py:252-261",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/execution_engine/position_reconciler.py:265-274",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/monitoring/health_check.py:375-387"
+      ],
+      "suggested_fix": "circuit_breaker: _trip は直近発注から紐付く order.correlation_id を保持しておき RiskAlertEvent に付与、KillSwitch._activate は `correlation_id=f'ks-{self._activated_at.isoformat()}'` を発行し以降の cancel_order / OrderEvent(CANCELLED) 全てに同 cid を継承。position_reconciler: discrepancy ごとに `correlation_id=f'recon-{ts}-{strategy}:{instrument}'`、individual alert ごとに影響 position の correlation_id リストを details に併記。health_check: `correlation_id=f'oanda-outage-{start_ts.isoformat()}'` で paired recovery alert と join 可能にする。",
+      "carryover_from_round_1": true
+    },
+    {
+      "id": "PA-002",
+      "severity": "high",
+      "area": "config / secret_hygiene",
+      "title": "oanda_api_key が plain str のまま — Round 1 指摘から無修正、settings dump / exception locals / /status 経由で live token がログ・ダッシュボードに流出する経路が残存",
+      "description": "PlatformSettings.oanda_api_key は settings.py:37 で `str = Field(default='', description='OANDA v20 APIキー')` のまま。Grep 全 fx_trading_system ツリーで SecretStr の使用箇所はゼロ件（0件）で確認済。Round 1 で追加された model_validator `_enforce_production_snapshot_required`（settings.py:242-256）は production 保護を一つだけ足したが、API key の SecretStr 化は入れていない。main.py は本 settings を直接抱え、get_status()/metrics endpoint を expose しているため、将来 dashboard が `settings.model_dump()` を含める拡張を入れた瞬間に本番トークンが HTTP 経由で流出する。また broker/oanda_adapter/client.py や stream_receiver.py で使われるが例外 traceback に locals が含まれればレコードされる経路も同様に開いたまま。CLAUDE.md security 節は defence-in-depth を要求している。",
+      "evidence": [
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/config/settings.py:37",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/main.py:187-191",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/main.py:388-392",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/main.py:458-461"
+      ],
+      "suggested_fix": "`from pydantic import SecretStr` して `oanda_api_key: SecretStr = Field(default=SecretStr(''))` に変更。使用箇所 4 箇所（main.py:187, 388, 458-461, broker/oanda_adapter/client.py、stream_receiver.py）で `.get_secret_value()` 経由に置換。`oanda_account_id` も機微度に応じて SecretStr 化を検討。pytest guard として `assert 'api_key' not in str(PlatformSettings()) and 'oanda_api_key' not in PlatformSettings().model_dump_json()` を追加。SecretStr.__repr__ は '**********' を返すため traceback locals / logger 引数 / dashboard JSON serialize 全てで defence-in-depth が効く。",
+      "carryover_from_round_1": true
+    },
+    {
+      "id": "PA-005",
+      "severity": "high",
+      "area": "event_bus / shutdown_race",
+      "title": "InMemoryEventBus.publish(_running=False) は warning 返却で silent drop のまま — RedisEventBus 側の drain 拡張（FTS-PA-15）で非対称性はさらに悪化",
+      "description": "Round 1 で PA-005 として指摘した memory_adapter.py:84-86 の `if not self._running: logger.warning(...); return` 早期 return が Round 2 でも残存。一方 Round 1 は両アダプタに _inflight_tasks drain（FTS-PA-15）を追加したが、InMemoryEventBus.stop は L58 で `self._running = False` を最初に落としてから drain に入る（memory_adapter.py:57-75）ため、drain 中に発生する新規 publish が guard で弾かれる窓が新たに広がった。RedisEventBus.publish は `self._running` を見ない（redis_adapter.py:169 以降、_redis チェックのみ）ため、stop() 進行中も handler フォールバック経路（_dispatch_local）が実行される非対称が残る。これにより SIGNAL→ORDER→FILL の最後の 1 コマ（FillEvent / KS 発動由来の RiskAlert）がテスト（InMemory）では落ち、本番（Redis）では通る drift が継続する。_inflight_tasks drain は保護するが、drain 中の新規 publish は handler に届かない。",
+      "evidence": [
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/event_bus/memory_adapter.py:48-75",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/event_bus/memory_adapter.py:77-90",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/event_bus/redis_adapter.py:126-167",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/event_bus/redis_adapter.py:169-212"
+      ],
+      "suggested_fix": "3 択のいずれか: (a) stop() で `self._accepting_new = False`（新規変数）だけを先に倒し `_running` は drain 後に倒す、(b) publish で `_running=False` 時は EventBusNotRunningError を明示的に raise してサイレント消失を禁止（呼出側は fill 確定後なら握り潰しではなくログ + 再送キュー）、(c) drain フラグ（self._draining）を導入し drain 中の publish は受理→drain タスクに合流。RedisEventBus にも対称ガードを加え、両アダプタで 'stop 中の publish はどうなるか' を SHARED_CONTRACT.md に明記。pytest で test_publish_during_stop_not_lost.py を追加し、両アダプタで同一挙動を assert する。",
+      "carryover_from_round_1": true
+    },
+    {
+      "id": "PA-R2-007",
+      "severity": "high",
+      "area": "event_bus / pydantic_contract",
+      "title": "BaseEvent 系に extra='forbid' が未設定、かつ ATLAS TradeSignal への extra='forbid' も未設定 — Round 1 PA-004 指摘から無修正で cross-repo version drift が隠蔽される",
+      "description": "Round 1 PA-004 として events.py BaseEvent / TickEvent / BarEvent / SignalEvent / OrderEvent / FillEvent / RiskAlertEvent / HeartbeatEvent への `model_config = ConfigDict(extra='forbid')` 追加を推奨したが Round 2 時点で未適用（events.py:79, 175, 261 等に ConfigDict 設定なし）。Grep で `extra='forbid'` は fx_trading_system 全ツリーに 0 件、`extra='ignore'` のみ payloads.py に 2 箇所。RedisEventBus._dispatch は redis_adapter.py:374 で `event_cls.model_validate_json(raw_data)` を実行するため、ATLAS 側が TradeSignal に新フィールド（例: `urgency`, `stop_loss_type`）を追加した時に FTS 側 consumer が silent drop する。SignalEvent.signal が `TradeSignal` を保持する構造（events.py:180）で、ATLAS 側 atlas/common/models.py:62 の TradeSignal も `extra='forbid'` になっていないのでどちらも検出機構がない。結果、cross-process / cross-repo の契約変更が Redis PubSub 経由で静かに情報を落とし続け、runtime でしか気付けない。",
+      "evidence": [
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/models/events.py:79-94",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/models/events.py:175-181",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/models/events.py:261-268",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/event_bus/redis_adapter.py:373-381",
+        "C:/data/制作物/claude/ATLAS/atlas/common/models.py:62"
+      ],
+      "suggested_fix": "events.py BaseEvent に `from pydantic import ConfigDict` + `model_config = ConfigDict(extra='forbid')` を 1 箇所追加（全サブクラスに継承伝播）。ATLAS/atlas/common/models.py の TradeSignal / FillEvent / StrategyConfig にも同設定を入れる（ATLAS 単方向 contract 維持のため atlas 側を先行修正→fx_trading_system 側で pytest roundtrip 試験）。tests/contract/test_event_roundtrip_forbid.py を新設し、未知フィールド追加 json を model_validate_json に投げた際に ValidationError になることを assert。SHARED_CONTRACT.md の '3. 変更ルール' に 'TradeSignal の field 追加は FTS 側で extra='forbid' を一時解除→両側同期→再度 forbid 化する' の手順を明記。",
+      "carryover_from_round_1": true
+    },
+    {
+      "id": "PA-R2-008",
+      "severity": "high",
+      "area": "strategy_engine / loader",
+      "title": "loader._import_strategy_class finally で sys.modules.pop する設計のまま — pickle / issubclass / pydantic 再評価で ModuleNotFoundError が再起動や永続化経路で発火する潜在欠陥",
+      "description": "loader.py:579-584 は成功パスでも `finally: sys.modules.pop(module_name, None)` を実行（FTS-PA-09 ホットリロード対策としての過矯正）。Round 1 Round 2 を通じて修正されていない。Python の内部機構（pickle.dumps, copy.deepcopy, pydantic BaseModel re-validation, abc.ABCMeta.__subclasscheck__, dataclasses._process_class の再評価）はインスタンスの `cls.__module__` から sys.modules を引くため、以下の経路で `ModuleNotFoundError: atlas_strategy_ATLAS-2026-xxxx` が出る: (a) StateStore 永続化の VirtualPosition.model_dump_json() 自体は OK でも、dashboard が戦略インスタンス経由で pickle を試みた瞬間に死ぬ、(b) metrics 収集が戦略クラスの repr を長期保存→再ロード時死ぬ、(c) ATLAS 側 sandbox_runner.py は sys.modules に残す実装（非対称）で、FTS だけが pop するため parity が破れる。Round 1 で追加した CSR-R1-002 の SANDBOX_BUILTINS 注入（loader.py:549-550）は別系統のため影響なし。",
+      "evidence": [
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/strategy_engine/loader.py:518-584",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/strategy_engine/loader.py:579-584",
+        "C:/data/制作物/claude/ATLAS/atlas/validator/sandbox_runner.py"
+      ],
+      "suggested_fix": "finally の `sys.modules.pop` を削除し、失敗時のみ try/except 内で del する（= 旧実装に戻す）。hot-reload 要件を残す場合は module_name に `uuid.uuid4().hex[:8]` もしくはプロセスワイドな単調増加カウンタを含め、旧モジュールを sys.modules に残したまま新モジュールを別キーで登録する。テストとして tests/unit/test_loader_pickle_roundtrip.py を追加: ロード後のインスタンスに対し `pickle.dumps(instance)` と `issubclass(type(instance), Strategy)` を assert する。ATLAS/atlas/validator/sandbox_runner.py との parity 試験も tests/parity/ に追加。",
+      "carryover_from_round_1": false
+    },
+    {
+      "id": "PA-R2-009",
+      "severity": "high",
+      "area": "event_bus / backpressure",
+      "title": "Event Bus 両実装に backpressure / dead letter 機構が存在しない — _invoke_handlers が handler ごとに `asyncio.create_task` を無制限に生成しメモリリーク / slow handler 時の snowball に対して無防備",
+      "description": "InMemoryEventBus._invoke_handlers (memory_adapter.py:114-133) / RedisEventBus._invoke_handlers (redis_adapter.py:407-427) とも、handler ごとに `asyncio.create_task(handler(event))` を生成し即 gather する実装。_inflight_tasks set に追加されるが上限はない（PA-15 の drain 目的で追跡しているのみ）。以下の critical 運用問題がある: (a) ストリーム洪水時（OANDA 約定イベント連打、stream reconnect 後の backlog）に handler の処理が追いつかないと create_task が積み上がり RSS が爆発する、(b) handler が deadlock / blocking I/O した場合、同 EventType の後続 publish が gather await で chained に詰まり、publish 側（coordinator / strategy_worker）が芋蔓式にストールする、(c) handler 例外は個別 log されるだけで dead letter queue に保存されず、監査観点で事後解析不能。correlation_locks LRU（10000 上限、redis_adapter.py:91 / memory_adapter.py:40）は cid レベルの memory 保護のみで handler task 数は保護しない。",
+      "evidence": [
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/event_bus/memory_adapter.py:114-133",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/event_bus/redis_adapter.py:407-427",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/event_bus/redis_adapter.py:94"
+      ],
+      "suggested_fix": "両 _invoke_handlers に asyncio.Semaphore 制限（handler 同時実行上限、例: 256）を導入し、上限到達時は logger.error + metrics.inc_event_handler_shedded(event_type=...) で観測可能化。handler 例外を dead letter jsonl（logs/event_bus/dead_letter.jsonl、fsync append）に書き出す `_record_dead_letter(event, handler_name, error, tb)` を追加。Prometheus counter `event_bus_handler_inflight` と `event_bus_dead_letter_total` を publish。負荷試験 tests/load/test_event_bus_burst.py を新設し、1k events/sec を 60 秒打ち込んで RSS が発散しないことを確認。",
+      "carryover_from_round_1": false
+    },
+    {
+      "id": "PA-R2-010",
+      "severity": "high",
+      "area": "config / snapshot_log_path",
+      "title": "snapshot_log_path がデフォルトで相対パス `logs/trade_context/snapshots.jsonl` — プロセス起動 CWD に依存し、systemd / docker / forward_test で write 先が分裂して監査証跡が追跡不能になる",
+      "description": "settings.py:154-160 の `snapshot_log_path: Path = Field(default=Path('logs/trade_context/snapshots.jsonl'))` は相対パス。main.py:338-340 がこれを SnapshotWriter に渡し、snapshot_writer.py:37 が `self._path.parent.mkdir(parents=True, exist_ok=True)` で CWD 相対にディレクトリを作る。起動経路が複数存在する（run_standalone / FastAPI lifespan / forward_test.py / scripts/run_unified.py）ため、CWD が異なると snapshots.jsonl が別々のディレクトリに書かれ、かつ log_dir も相対（settings.py:87-90 `Path('logs/app')`）なので監査者が '今日の snapshot' を 1 箇所で回収できない。また Round 1 で PA-003 の fail-closed ゲートは配線済だが、write 先が実在サーバで絶対パスに明示固定されない限り、運用者は systemd unit WorkingDirectory の設定ミスで完全に別ディレクトリへ落ちる体験をし得る。production の model_validator（settings.py:242-256）は snapshot_required=True を強制するが、write 先のパス妥当性は検証していない。",
+      "evidence": [
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/config/settings.py:87-90",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/config/settings.py:154-160",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/main.py:338-340",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/data/trade_context/snapshot_writer.py:36-38"
+      ],
+      "suggested_fix": "(a) settings.py に `@model_validator(mode='after') _resolve_paths` を追加し、snapshot_log_path / log_dir が相対だったら `Path.cwd()` ではなく専用の `base_dir` 設定（例 `FTS_DATA_DIR` 環境変数、無ければ `Path.home() / 'fx_trading_system'`）で絶対パス化する、(b) production で snapshot_log_path.is_absolute() が False なら起動拒否、(c) SnapshotWriter.__init__ で `if not self._path.is_absolute(): logger.critical(...)` を追加。runbook に 'systemd unit で WorkingDirectory=/var/lib/fx-trading-system を必須にする' を記載。",
+      "carryover_from_round_1": false
+    },
+    {
+      "id": "PA-R2-011",
+      "severity": "high",
+      "area": "application_startup / state_recovery ordering",
+      "title": "main.py start() で state_recovery が health_check.start より前・bar_builder.start より前に走るため、復元結果を健全性監視で可視化できず、復元成功/失敗が運用ダッシュボードに即時反映されない",
+      "description": "main.py:536-550 の起動順は `event_bus.start → _build_probers → _recover_state_fail_closed → health_check.start → bar_builder.start → ...`。state_recovery は event_bus の直後に走るが、HealthChecker は _recover_state 後にしか start しない。このため (a) recover_state がハングした場合、HealthChecker の定期 prober（redis/oanda/event_bus/postgres）はまだ 1 度も実行されておらず、`/health` endpoint は 'not_initialized' を返し外形監視が誤って 503 をずっと出し続ける、(b) recover_state 中に Redis が落ちていた場合、HealthChecker prober は state recovery タイムアウト後に回り始めるため、運用者は 'なぜ再起動が遅いのか' を Redis ping で可視化できない、(c) RE-001 が想定する 'Redis 停止で fail-closed' では復元失敗を loud CRITICAL ログにしか出せず、Prometheus /metrics が未起動のため外形監視→PagerDuty 連動に遅延が出る。Round 1 の RE-001 が main.py:550 に recover_state を挟み込んだ副作用。",
+      "evidence": [
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/main.py:536-582",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/main.py:648-690",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/main.py:820-852"
+      ],
+      "suggested_fix": "起動順を `event_bus → health_check（prober 含む）→ state_recovery → bar_builder → coordinator → ...` に変更する。health_check は recover 前に起動済みで、recover_state 中でも `/health` は `state_recovery_in_progress` ステータスを返す。HealthChecker に `set_recovery_state(in_progress=True)` を追加し、recover 完了で False、recover 失敗で `recovery_failed=True` を立てる。外形監視は recovery 中は 503 ではなく 202 Accepted を返し、recovery 失敗のときだけ 503 にする。併せて Prometheus counter `state_recovery_duration_sec` を追加。",
+      "carryover_from_round_1": false
+    },
+    {
+      "id": "PA-R2-012",
+      "severity": "high",
+      "area": "event_bus / sequence_number",
+      "title": "RedisEventBus._fallback_seq_gen と publish 成功側の INCR が混在する状況で sequence_number の単調性が壊れる — _dispatch_local 経路では seq が fallback 生成器から、通常経路では Redis INCR から、再接続後は両方が並走する可能性",
+      "description": "redis_adapter.py:80-81 で `self._fallback_seq_gen = SequenceNumberGenerator()` が作られ、publish では (a) `self._redis is None` のとき fallback から next()、(b) `self._redis.incr` が失敗したときも fallback から next()、(c) 正常時は Redis INCR（redis_adapter.py:181-194）という 3 分岐。SequenceNumberGenerator はプロセス内ローカル counter（events.py:41-56）なので、publish 成功で Redis seq=1000, Redis 切断 → fallback seq=1 という逆転が発生する。_listen 側 _dispatch は受信した event.sequence_number をそのまま handler に渡すため、consumer（例: fill 監査 jsonl writer）が単調増加を仮定していると順序判定が壊れる。さらに fallback seq は publish 側でしか更新されず、Redis 再接続後に正常 INCR に戻ると seq が突然 1000 に飛ぶ。Round 1 で FTS-PA-10 として '分散単調' を狙ったが、fallback の存在が意図を破壊している。",
+      "evidence": [
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/event_bus/redis_adapter.py:80-81",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/event_bus/redis_adapter.py:169-212",
+        "C:/data/制作物/claude/fx_trading_system/trading_platform/core/models/events.py:41-56"
+      ],
+      "suggested_fix": "(a) fallback seq に必ず `sign='LOCAL:' + str(seq)` のような prefix をつけて Redis INCR 由来の seq と型的に区別する、または (b) fallback 発動時は `sequence_number=-abs(local_seq)` のように負数を使い、consumer が `if seq < 0: treat_as_fallback()` と分岐できるようにする。SHARED_CONTRACT.md に 'sequence_number は単調増加を保証しない（Redis 切断時）' を明記。もし強い単調性が要るなら Redis INCR を WATCH/TRANSACTION で保護し fallback 発動時は publish を拒否する fail-closed に倒す。tests/integration/test_seq_monotonic_under_outage.py で 1000 events 中 10% で Redis 切断 → 再接続シナリオを回し、seq の整合性を assert。",
+      "carryover_from_round_1": false
+    }
+  ]
+}

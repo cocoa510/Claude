@@ -1,0 +1,122 @@
+{
+  "agent": "risk-execution-engineer",
+  "findings": [
+    {
+      "id": "RE-001",
+      "severity": "critical",
+      "area": "state_store/crash_recovery",
+      "title": "StateStore はクラッシュ復旧で一切読み込まれない（save-only dead write）",
+      "description": "main.py と ExecutionCoordinator は save_order / save_position / save_risk_state / save_account_risk_state を呼び出して状態を永続化するが、プロセス再起動時に load_* 系 API を呼び出す経路が本番コードに一切存在しない。grep 結果 state_store.load_position / load_order / load_risk_state / load_account_risk_state はテストコード以外で全くヒットしない。つまり再起動後は in-memory の OrderManager._orders, FillProcessor._positions, RiskState がすべて空から開始され、kill_switch_active=True で落とした直後に再起動すると KS 状態が失われ（Redis には AccountRiskState が残っているが読まない）、日次損益累計もゼロリセットされる。これは Critical Safety: 『KS 発動 → 再起動 → 素通り発注』経路が実装レベルで塞がれていない。また OANDA 側を Truth として照合する起動フックも存在せず、現実のオープン Trade と完全に無同期で稼働開始する。",
+      "evidence": [
+        "trading_platform/data/state_store/redis_store.py:101 (load_position 定義)",
+        "trading_platform/data/state_store/redis_store.py:126 (load_order 定義)",
+        "trading_platform/data/state_store/redis_store.py:146 (load_risk_state 定義)",
+        "trading_platform/data/state_store/redis_store.py:168 (load_account_risk_state 定義)",
+        "trading_platform/main.py:309-310 (state_store 生成のみ / recover 呼出なし)",
+        "trading_platform/core/execution_engine/coordinator.py:494-517 (_persist_order / _persist_position は save のみ)"
+      ],
+      "suggested_fix": "main.py._initialize() の ExecutionCoordinator 生成直後、および worker.start() の前段に StateStoreRecoverer を追加する。手順: (1) load_account_risk_state() → is_kill_switch_active=True なら RiskState.set_kill_switch(True) と broker_gateway.halt() を再適用、(2) OANDA get_open_trades() を Truth として照合、ローカル positions の再構築、(3) broker_trade_id が残っているローカル order は OANDA 側状態を正として reconcile、ミスマッチは CRITICAL アラートで人間判断を要求。CI 用 grep ガード (state_store.load_ の本番参照件数 > 0) を追加し、dead code 化を再発防止する。"
+    },
+    {
+      "id": "RE-002",
+      "severity": "critical",
+      "area": "risk_engine/ptrc_post",
+      "title": "PTRC-Post が最新 fill を織り込まず評価 — Level3 KS 連鎖が 1 fill 遅延",
+      "description": "ExecutionCoordinator._on_signal は fill 処理後に (A) _run_post_trade_risk(order, fill_price) を呼び (B) その後で risk_state.daily_realized_pnl += realized_pnl を加算している。順序が逆転しているため PTRC-Post._check_max_daily_loss / _current_loss_ratio は**直前の損失 fill を未反映のまま評価**する。具体的には max_daily_loss=10% を連続損失で一気に突破する場面で、当該 fill の realized_pnl が次回の fill まで反映されず、Level3(kill_switch_daily_loss=15%) 閾値判定が 1 件分遅れる。Kill Switch 連鎖発動が 1 トレード遅れることで、15% 発動閾値が事実上 15%+1 loss 分のオーバーシュートを許容する critical な遅延バグ。",
+      "evidence": [
+        "trading_platform/core/execution_engine/coordinator.py:398 (_run_post_trade_risk 呼出、pnl 未加算)",
+        "trading_platform/core/execution_engine/coordinator.py:410-411 (daily_realized_pnl 加算、PTRC-Post 評価の後)",
+        "trading_platform/core/risk_engine/ptrc_post.py:100 (daily_loss = risk_state.daily_realized_pnl + risk_state.daily_unrealized_pnl を参照)"
+      ],
+      "suggested_fix": "coordinator.py._on_signal 内の realized_pnl 加算を _run_post_trade_risk の**前**に移動する（exposure / unrealized_pnl も同様に先行更新）。または _run_post_trade_risk に realized_pnl を引数渡しし、PTRC-Post 内部で仮加算したビューで評価する。回帰テスト『連続損失で 15% 閾値直前 → 次 fill で即座に KS』を pytest に追加。"
+    },
+    {
+      "id": "RE-003",
+      "severity": "high",
+      "area": "risk_engine/ptrc",
+      "title": "PTRC に spread check が存在しない（SHARED_CONTRACT 記載の必須ゲート欠落）",
+      "description": "SHARED_CONTRACT.md §12.2 / §12.4 は spread_check_mode と通貨ペア別 pip スケール判定を PTRC 周辺で行うべき要件として記載しているが、ptrc.py の evaluate() は (fat_finger, max_risk, max_daily_loss, total_exposure, per_pair_exposure, margin, cb_ks) の 7 gate しか実行せず、spread gate が一切存在しない。bar レベルの spread チェックは validate_bar、tick レベルは validate_tick に分散しているが『注文直前の spread が許容閾値内か』という PTRC レベルの最終確認は無防備。スプレッド急拡大時（NY クローズ跨ぎ/高 impact ニュース直後）のエントリーを構造的に止められない。audit task が明示要求したチェック項目にも該当。",
+      "evidence": [
+        "trading_platform/core/risk_engine/ptrc.py:87-144 (evaluate() 内に spread check なし)",
+        "trading_platform/core/models/risk.py:21-30 (PTRCCheckType に SPREAD 列挙値なし)",
+        "docs/SHARED_CONTRACT.md:312-339 (spread 閾値は通貨ペア別 pip スケールで評価 / PTRC 側 warmup gate 整備必須)"
+      ],
+      "suggested_fix": "PTRCCheckType.SPREAD_GUARD を追加し、_check_spread(order, tick_snapshot) を evaluate() に組込む。閾値は pip_scale_for(instrument) で pip 単位に変換し、Settings.max_spread_pips_by_instrument (JPY デフォルト 3.0 pips / その他 2.0 pips) と比較。tick 情報は TradeContextSnapshot.bid/ask で渡し、snapshot 欠落時は fail-safe で REJECT。運用初期は spread_check_mode=observe（ログのみ） → block への段階的移行を推奨。"
+    },
+    {
+      "id": "RE-004",
+      "severity": "high",
+      "area": "risk_engine/kill_switch",
+      "title": "Kill Switch は新規注文ブロックのみで既存オープン建玉を決済しない",
+      "description": "KillSwitch._activate() は (1) retry_manager.stop_all, (2) broker_gateway.halt, (3) キュー drain, (4) pre-submit 状態の order 取消, (5) SUBMITTED/ACKNOWLEDGED 状態の in-flight 注文を OANDA 側 cancel_order REST で取消、の 5 段階を実行するが、**既に FILLED してオープン状態のポジション（現物 Trade）を close する処理が無い**。KS 発動時点で日次損失が既に 15% に到達しているにも関わらずオープン・ポジションはブローカー側で損益変動を続け、KS 後も drawdown が無制限に拡大する。仕様 (circuit_breaker.py:160-163) では『全取引を緊急停止』と謳っているが実装は『新規停止』に留まる。また OANDA 疎通途絶 (health_check._publish_oanda_outage_alert) は CRITICAL アラートを発行するが KS 自体をトリガしない（『Kill Switch連動推奨』のメッセージのみ）ため、health_check 由来の自動 KS チェーンも未配線。",
+      "evidence": [
+        "trading_platform/core/risk_engine/circuit_breaker.py:283-400 (_activate() 実装、close_trade / close_all_positions 呼出なし)",
+        "trading_platform/core/monitoring/health_check.py:368-390 (OANDA 途絶で RiskAlertEvent 発行だが KS.evaluate_and_activate() は呼ばない)",
+        "trading_platform/core/execution_engine/broker_gateway.py:302-314 (close_trade は実装されているが KS 経路で未使用)"
+      ],
+      "suggested_fix": "KillSwitch.__init__ にオプション policy={'close_all_on_activate': True} を追加し、_activate() 末尾で broker_gateway.get_open_trades() → broker_gateway.close_trade(trade_id) を全 trade に対して発行する（失敗時は CRITICAL ログ + reconciler に委譲）。また health_check.py の _publish_oanda_outage_alert() に KillSwitch 参照を渡し、OANDA_OUTAGE_THRESHOLD 超過時に kill_switch.evaluate_and_activate(reason='oanda_connection_lost') を呼ぶか、RiskAlertEvent subscriber を KillSwitch に追加して alert_type='oanda_connection_lost' を受けて自動発動する。ポリシーは manual_reset まで要求。"
+    },
+    {
+      "id": "RE-005",
+      "severity": "high",
+      "area": "execution_engine/state_persistence",
+      "title": "Order/Position 永続化失敗を silently swallow — 『broker 送信済み / state 未保存』死角",
+      "description": "ExecutionCoordinator._persist_order / _persist_position は try/except で Exception を握りつぶし logger.error のみ出力する fire-and-forget 設計。Redis 接続断・シリアライズ失敗時に **broker への注文送信は成功しているのに state_store 側は古い値のまま**という不整合が発生する。直後にプロセスがクラッシュすると RE-001 と合わせて『ブローカーには建玉あり / ローカル履歴には完全欠落』という最悪の状態になる。ログ行は出るが運用者が即座に気づく仕組み（metrics / alert）が無く、PositionReconciler が起動後に instrument_quantity_mismatch を出すまで検知ラグが存在する。",
+      "evidence": [
+        "trading_platform/core/execution_engine/coordinator.py:494-503 (_persist_order の try/except ログのみ)",
+        "trading_platform/core/execution_engine/coordinator.py:505-517 (_persist_position の try/except ログのみ)",
+        "trading_platform/core/execution_engine/coordinator.py:392-395 (fill 完了後の永続化、失敗しても fill event publish は継続)"
+      ],
+      "suggested_fix": "_persist_order / _persist_position 失敗時に (1) Prometheus counter fx_state_persist_failures_total{type=order|position} をインクリメント、(2) RiskAlertEvent(level=CRITICAL, alert_type='state_persist_failed') を発行、(3) 連続 N 回失敗でヘルスチェック component 'state_store' を unhealthy に遷移（critical component 扱いでシステム全体 degraded）。理想的には order_submitted → state_persisted を同一トランザクションにし、永続化失敗時は order を FAILED 遷移して戦略に通知する fail-closed フローに変更。"
+    },
+    {
+      "id": "RE-006",
+      "severity": "high",
+      "area": "execution_engine/slippage_guard",
+      "title": "Slippage Guard は発注前チェックが無く post-trade alert のみ — 注文取消経路が未実装",
+      "description": "task 要件『slippage guard — cancel threshold pip-scale-aware?』に対し、現実装には pre-trade slippage guard が存在しない。PTRC-Post.evaluate_fill で ABNORMAL_SLIPPAGE_THRESHOLD_PIPS=5.0 を post-trade で判定するのみで、この時点で注文は既に約定済み — 取消不能。MARKET 注文しか使っていないため『注文取消による slippage 制御』は構造的に不可能。LIMIT 注文の上限価格設定や OANDA 側の priceBound（priceThreshold）指定も実装されていない。また閾値 5.0 pips は pip_scale_for(instrument) で JPY=100 / その他=10000 にスケール変換した後の pips 値なので pip-scale-aware だが、閾値自体は全通貨ペア共通の定数で、EUR_USD と USD_JPY ではボラティリティ特性が異なるため不適切。",
+      "evidence": [
+        "trading_platform/core/risk_engine/ptrc_post.py:28 (ABNORMAL_SLIPPAGE_THRESHOLD_PIPS = 5.0 定数)",
+        "trading_platform/core/risk_engine/ptrc_post.py:67-97 (post-trade でのみ検知、cancel 不能)",
+        "trading_platform/broker/oanda_adapter/client.py:220-290 (priceBound / priceThreshold 未使用)"
+      ],
+      "suggested_fix": "OANDA Market Order に priceBound=expected_price ± max_slippage_pips を付与（MARKET_IF_TOUCHED）。max_slippage_pips_by_instrument を Settings に追加し、JPY=2.0 / major=1.5 / minor=3.0 をデフォルトに。LIMIT オーダー発行経路も整備し、戦略層から order_type=LIMIT 指定時は order.price±max_slippage で protective band を付与する。ABNORMAL_SLIPPAGE_THRESHOLD_PIPS も instrument dict に分割。"
+    },
+    {
+      "id": "RE-007",
+      "severity": "high",
+      "area": "risk_engine/ptrc/fat_finger",
+      "title": "Fat Finger チェックは units のみで notional を見ない — 通貨ペア間で危険域が不均一",
+      "description": "HARD_LIMITS.max_order_quantity=1_000_000 units は全通貨ペア共通の絶対閾値。USD_JPY 1M units @150 は 150M JPY notional (1 百万米ドル相当)、EUR_USD 1M units @1.1 は 1.1M USD notional だが、JPY account で見ると USD_JPY は 150M JPY・EUR_USD は 165M JPY と 10% 程度の差が生じ、さらに GBP_USD (@1.27) は 190M JPY 相当と更に高リスク。Fat finger の本来目的は『桁誤入力で 100x のオーダーを誤発注しないこと』なので units ベースでも桁間違いの阻止目的は果たすが、**クロス通貨での notional 差が 27% も生じる**のは仕様としては甘い。user task が具体的に懸念した『USD_JPY scale leaking into EUR_USD』の逆方向で、「EUR_USD 1M は USD_JPY 1M より 27% notional が大きい」という事象がある。",
+      "evidence": [
+        "trading_platform/core/models/risk.py:189-193 (max_order_quantity = 1_000_000 / min_order_quantity = 100 通貨ペア横断共通)",
+        "trading_platform/core/risk_engine/ptrc.py:180-198 (_check_fat_finger は quantity のみ比較)"
+      ],
+      "suggested_fix": "Fat Finger を二段構成にする: (1) 既存の units 閾値（桁誤入力阻止）、(2) notional ≤ HARD_LIMITS.max_order_notional_jpy（口座通貨建て絶対額、デフォルト 20M JPY）を PTRC 内で追加計算。notional = quantity * ref_price * currency_converter(quote→account)。instrument 別の max_order_quantity_by_instrument dict を Settings で上書き可能にし、JPY クロスと非 JPY ペアで分岐させる。"
+    },
+    {
+      "id": "RE-008",
+      "severity": "high",
+      "area": "risk_engine/ptrc/total_exposure",
+      "title": "Total Exposure チェックは context_snapshot.price 欠落時に 0 扱いで fail-safe に倒れない",
+      "description": "PTRC._check_total_exposure は ref_price を context_snapshot.price から取得するが、None だった場合は『0 扱い』で new_order_notional=0 として計算を続行する（ptrc.py:321-330）。結果、snapshot 欠落時は**新規注文 notional=0 として既存ポジションのみで exposure_ratio を判定**し、事実上新規注文分を見逃して approve してしまう fail-open バグ。_check_max_risk_per_trade / _check_margin はどちらも参照価格不在で REJECT する fail-safe 設計なのに、total_exposure だけ一貫性が崩れている。",
+      "evidence": [
+        "trading_platform/core/risk_engine/ptrc.py:321-337 (ref_price=0.0 デフォルト、new_order_notional=order.quantity * 0.0 = 0)",
+        "trading_platform/core/risk_engine/ptrc.py:457-471 (_check_margin は ref_price 不在で REJECT する対比)"
+      ],
+      "suggested_fix": "_check_total_exposure の冒頭で ref_price == 0 または None の場合は passed=False で即 PTRCCheck を返す（fail-safe）。詳細 details に reason='reference_price_unavailable' を記録。order.price → context_snapshot.price → fill_price の順で探索する挙動は _check_margin と揃える。回帰テスト『context_snapshot 無しの order で PTRC が REJECT する』を追加。"
+    },
+    {
+      "id": "RE-009",
+      "severity": "high",
+      "area": "execution_engine/broker_gateway",
+      "title": "BrokerGateway._attempts が無制限に増加 — 長期稼働で memory leak",
+      "description": "BrokerGateway._attempts: dict[str, int] は order_id ごとに submit 試行回数を記録するが、order が terminal 状態 (FILLED/CANCELLED/REJECTED/FAILED) になっても entry を削除しない。OrderManager._cleanup_terminal_orders() と同じ cleanup ポリシーが BrokerGateway 側に存在せず、1 ヶ月連続稼働で数十万 order_id を保持し続ける。メモリリークとしては小さいが、長期 Forward Test / Live 運用で継続的に拡大するため HIGH に分類。",
+      "evidence": [
+        "trading_platform/core/execution_engine/broker_gateway.py:115 (self._attempts: dict[str, int] = {})",
+        "trading_platform/core/execution_engine/broker_gateway.py:117-119 (_next_attempt は increment のみ、削除なし)"
+      ],
+      "suggested_fix": "BrokerGateway に on_order_terminal(order_id) フックを追加し、OrderManager.transition_order() が terminal 状態遷移した時に self._attempts.pop(order_id, None) を呼ぶ。または OrderManager._cleanup_terminal_orders と同じ期間 / 件数ベースで周期的に掃除する。"
+    }
+  ]
+}
