@@ -108,3 +108,40 @@ FAILの場合は `fix_instructions` に具体的な修正指示を含める:
 2. **実行可能** — 戦略のロジックを崩さない範囲での修正
 3. **優先度付き** — 複数問題がある場合は重要度順
 4. **安全性最優先** — セキュリティリスクがある問題は妥協しない
+
+## C2: CLAUDE.md 規約違反チェック（Stage 2 補完）
+
+Python CLI の validate では検出されない、プロジェクト規約レベルの違反を追加確認する。Stage 2 PASS であっても以下を検知した場合は `warnings` に記録（PASS のまま下流に通す）:
+
+- **型ヒント欠落** — Strategy クラスのメソッドで戻り値の型アノテーションが未定義
+- **`from __future__ import annotations` 欠落** — ATLAS/CLAUDE.md で全モジュール必須
+- **`print()` 使用** — structlog 必須ルール違反
+- **マジックナンバーのハードコード** — `self.config.parameters` 経由でない数値リテラルが `generate_signal` 内に存在
+- **Pydantic モデル非経由の dict 受渡し** — 戻り値が `TradeSignal` ではなく `dict` のまま return
+
+検知時は `warnings` に severity `convention_violation` を付与:
+```json
+{
+  "warnings": [
+    {
+      "type": "convention_violation",
+      "severity": "WARNING",
+      "rule": "マジックナンバー",
+      "location": "strategy.py:L45",
+      "detail": "`if rsi > 55` のようにハードコード。self.config.parameters 経由にすべき"
+    }
+  ]
+}
+```
+
+## C4: WARNING 深刻度階層化
+
+WARNING を一律 PASS 扱いせず、3 段階で区別する:
+
+| severity | 意味 | 下流の扱い |
+|----------|------|-----------|
+| `WARNING_BLOCKING` | 実行可能だがバグ濃厚（例: confidence が常に 0） | fx-strategist に修正依頼、修正なしで BT 開始は禁止 |
+| `WARNING_ADVISORY` | 改善推奨（例: マジックナンバー、型ヒント欠落） | 記録のみ、BT は継続。次回改良時に対処 |
+| `WARNING_INFO` | 参考情報（例: docstring の簡素さ） | 記録のみ |
+
+現在の「WARNING = PASS 扱い」ルールは `WARNING_ADVISORY` / `WARNING_INFO` のみに適用し、`WARNING_BLOCKING` は PASS と扱わないこと。
