@@ -441,6 +441,12 @@ final_score: 0.76
   }
   ```
   `loop_session.json` の `last_alert` フィールドにも最新アラートを保存。`/atlas-status` 実行時に `last_alert` を冒頭表示する
+- **AUDIT-P0-001 (2026-04-18) 由来の必須ルール: アラート数値は実データ集計のみ** —
+  `logs/loop_alerts.log` に書き込む `reason` / `action_taken` フィールド内の**数値**（連続失敗回数、
+  経過分、リトライ回数、廃棄世代数等）は必ず `logs/loop_session.json` / `logs/loop_metrics.csv` /
+  History Store の**実データから集計した値**を記載すること。LLM の記憶や推測による数値記入を**禁止**する。
+  過去事例: 「20+ 連続 FAIL」と書かれたログが実データ max=5 であり、存在しない streak_counter バグを誤検出した。
+  実装: ログ書き込み前に Python CLI または Read で該当ファイルを読み、集計値を取得してから文字列を組み立てる。
 - ユーザーによる中断（Ctrl+C）時、`loop_session.json` と History Store に状態保存済み。`--resume` で再開可能
 
 ## 自動実行（ユーザー操作なし）

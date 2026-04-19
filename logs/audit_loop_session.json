@@ -1,39 +1,60 @@
 {
-  "session_id": "AUDIT-2026-0417-001",
-  "session_start": "2026-04-17T00:00:00Z",
+  "session_id": "AUDIT-2026-0418-001",
+  "session_start": "2026-04-18T18:40:00Z",
   "limit_minutes": 300,
   "threshold_pct": 94,
   "target": "both",
   "severity_threshold": "high",
-  "max_rounds": 2,
+  "max_rounds": 5,
   "max_fixes_per_round": 5,
-  "current_round": 2,
+  "current_round": 1,
+  "phase1_seed": {
+    "source": "5-agent investigation (logs/atlas_env_investigation/)",
+    "agents": ["data-engineer", "qa-tester", "quant-analyst", "platform-architect", "devil-advocate"],
+    "validated_by": "devil-advocate (rebuttal applied: streak counter false claim removed)",
+    "key_findings": [
+      {"id": "AUDIT-P0-002", "severity": "high", "area": "atlas/tests/golden/wfa_efficiency", "title": "test_wfa_efficiency_low_is_sharpe.py FAIL（QT-002）"},
+      {"id": "AUDIT-P0-003", "severity": "high", "area": "atlas/tests/golden/feature_store_mtf", "title": "test_simple_feature_store_mtf.py FAIL（QT-003）"},
+      {"id": "AUDIT-P1-001", "severity": "high", "area": "atlas/backtest/vectorbt_engine", "title": "L1 vectorbt sharpe_ratio() に year_freq 未指定で L2 と 1.185x ズレ（QA-002）", "evidence": ["vectorbt_engine.py:629"]},
+      {"id": "AUDIT-P1-002", "severity": "high", "area": "atlas/config/defaults", "title": "L1 閾値が vectorbt_engine.py:52-54 にハードコード、defaults.py に集約されていない（QA-001）"},
+      {"id": "AUDIT-P1-003", "severity": "medium", "area": "atlas/.claude/agents/fx-strategist", "title": "fx-strategist プロンプトが Sharpe>0.3 境界目標、>0.5 に引き上げ要"}
+    ],
+    "invalidated_findings": [
+      {
+        "id": "AUDIT-P0-001",
+        "severity_claimed": "critical",
+        "area": "atlas/orchestrator/streak_counter",
+        "title": "loop_alerts.log の連続FAILカウンター誤算（実際は max=5 だが '20+' と誤報）",
+        "invalidation_reason": "devil-advocate rebuttal: no streak_counter code exists. '20+' は logs/loop_alerts.log の free-text reason フィールドに LLM が記憶で書き込んだ値。実データ集計では max 連続 FAIL = 5。コードバグは存在せず Skill 層のドキュメント問題。",
+        "skill_level_fix": "atlas-loop.md エラーハンドリング §その他 に『reason フィールド内数値は実データ集計のみ』ルールを追加。commit [docs] で記録。"
+      }
+    ]
+  },
   "rounds": [
     {
       "round": 1,
-      "findings_total": 50,
-      "validated": 48,
-      "rejected": 2,
-      "downgraded": 11,
-      "selected_for_fix": 5,
+      "status": "in_progress_phase4_complete",
+      "findings_total": 6,
+      "validated": 5,
+      "invalidated": 1,
       "fixed": 5,
-      "deferred": 43,
-      "verdict": "continue",
-      "fixes": [
-        {"id": "RE-002", "commit": "de75c08", "repo": "fts", "title": "coordinator daily_pnl reorder"},
-        {"id": "RE-008", "commit": "35612c5", "repo": "fts", "title": "shared _resolve_reference_price"},
-        {"id": "PA-003", "commit": "e4ef35e", "repo": "fts", "title": "SnapshotWriter fail-closed wiring"},
-        {"id": "QA-003", "commit": "b5ea676", "repo": "atlas", "title": "overall_passed flip on is_duplicate"},
-        {"id": "RE-001", "commit": "d99a425", "repo": "fts", "title": "state recovery from persisted store"}
+      "deferred": 0,
+      "commits": [
+        {"id": "AUDIT-P0-002", "sha": "pending-confirm", "type": "[fix:bug]"},
+        {"id": "AUDIT-P0-003", "sha": "1bcdcd9", "type": "[fix:bug]", "note": "QT-002 & QT-003 同 commit"},
+        {"id": "AUDIT-P1-001", "sha": "076effc", "type": "[change:spec]", "note": "METRICS_SCHEMA_VERSION 4.7.0→4.8.0"},
+        {"id": "AUDIT-P1-002", "sha": "02ad6aa", "type": "[refactor]"},
+        {"id": "AUDIT-P1-003", "sha": "7da3b90", "type": "[docs]", "note": "parent repo (.claude/agents/fx-strategist.md)"}
       ]
     }
   ],
   "finding_history": {
-    "RE-001": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1},
-    "RE-002": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1},
-    "RE-008": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1},
-    "PA-003": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1},
-    "QA-003": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1}
+    "AUDIT-P0-001": {"first_seen_round": 1, "status": "invalidated", "resolution": "skill_level_rule_added"},
+    "AUDIT-P0-002": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1},
+    "AUDIT-P0-003": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1},
+    "AUDIT-P1-001": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1},
+    "AUDIT-P1-002": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1},
+    "AUDIT-P1-003": {"first_seen_round": 1, "status": "fixed", "fixed_in_round": 1}
   },
   "vibration_tracker": {}
 }
