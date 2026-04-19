@@ -1,0 +1,147 @@
+{
+  "agent": "devil-advocate",
+  "target": "atlas_bt_environment_investigation",
+  "investigation_timestamp": "2026-04-18T00:00:00Z",
+  "confidence": 0.82,
+  "bias_detected": [
+    {
+      "type": "fabrication",
+      "adoption_level": "must_fix",
+      "location": "loop_alerts.log",
+      "key_stat": "max_consecutive_fail=5 (not 20+)",
+      "pass_list": "0417-003(0.607), 0417-004(0.515), 0417-010(1.019), 0417-012(0.813), 0417-013(0.311), 0417-019(0.348)"
+    },
+    {
+      "type": "false_positive",
+      "adoption_level": "informational",
+      "location": "Gen023 15min hang claim",
+      "key_stat": "expected_duration=17.1min for 15 analyzed params at 66.4s/param",
+      "comparables": [
+        "ATLAS-2026-0409-008: 19params, analyzed=15, dur=997.4s=16.6min",
+        "ATLAS-2026-0417-003: 15params, analyzed=11, dur=1110.5s=18.5min",
+        "ATLAS-2026-0417-013: 18params, analyzed=15, dur=1064.6s=17.7min"
+      ]
+    },
+    {
+      "type": "optimism",
+      "adoption_level": "should_consider",
+      "location": "Gen023 PASS Sharpe=0.447 trades=66",
+      "key_stat": "SE=0.129, Z(vs L1=0.3)=1.14 < 1.96, 95%CI=(0.194, 0.700)",
+      "t_stat_vs_zero": 3.46,
+      "z_score_vs_threshold": 1.14
+    },
+    {
+      "type": "causal_inversion",
+      "adoption_level": "must_fix",
+      "location": "0408 era 97% PASS rate used as baseline",
+      "key_stat": "0408 era = 1 strategy family (30 improvements from 0408-013), NOT 33 independent samples",
+      "true_baseline": {
+        "old_first_gen_pre0416": "42.9% (3/7)",
+        "new_first_gen_0416plus": "30.0% (3/10)",
+        "z_score_difference": 0.55,
+        "p_value": 0.58,
+        "conclusion": "NOT statistically significant"
+      }
+    },
+    {
+      "type": "optimism",
+      "adoption_level": "should_consider",
+      "location": "urgency of environment investigation",
+      "key_stat": "current_streak=3 < historical_max=5. Past 5-streaks recovered without env fix (3 times)."
+    }
+  ],
+  "alternative_hypotheses": [
+    {
+      "id": 1,
+      "hypothesis": "BT environment abnormal",
+      "probability": "low",
+      "rationale": "No direct evidence. O(params) scaling explains Gen023 duration normally."
+    },
+    {
+      "id": 2,
+      "hypothesis": "Strategy generation quality degradation (fx-strategist prompt drift)",
+      "probability": "medium",
+      "rationale": "0416+ era first-gen PASS=30.0% vs pre-0416=42.9%, mean_sharpe=-0.237 vs +0.484."
+    },
+    {
+      "id": 3,
+      "hypothesis": "L1 threshold (0.3) vs fx-strategist prompt mismatch",
+      "probability": "medium",
+      "rationale": "4 strategies have positive Sharpe < 0.3: 0417-014(0.245), -015(0.275), 0417-018(0.182), 0418-001(0.182). Recoverable via explicit Sharpe target in prompt."
+    },
+    {
+      "id": 4,
+      "hypothesis": "New instrument spread/cost misconfiguration",
+      "probability": "medium",
+      "rationale": "EUR_JPY 0417-001(trades=1877), USD_JPY 0417-008(trades=1210) show extreme over-trading."
+    },
+    {
+      "id": 5,
+      "hypothesis": "Cluster cap forcing diversity into unknown territory",
+      "probability": "low",
+      "rationale": "CLUSTER_CAP=3 for USD_JPY may have pushed generation into less-understood pairs."
+    }
+  ],
+  "verdict": {
+    "environment_is_truly_abnormal": "partial",
+    "recommended_action": "mixed",
+    "priority_order": [
+      "1. fix_strategy_gen: improve fx-strategist prompt with explicit L1 Sharpe target, verify EUR_JPY/GBP_USD spread settings",
+      "2. review_l1_threshold: evaluate 4 near-miss strategies (positive but sub-0.3 Sharpe)",
+      "3. investigate_env: confirm why ATLAS-2026-0418-004 has NO RESULT (hang vs not-run)"
+    ]
+  },
+  "historical_pass_rate_analysis": {
+    "total_strategies_with_bt": 77,
+    "total_l1_pass": 49,
+    "total_l1_pass_rate_pct": 63.6,
+    "note": "0408 era bias: 32 of 33 PASS belong to 1 strategy family - not independent samples",
+    "first_gen_only_pass_rate": "35.3% (6/17)",
+    "old_first_gen_pass_rate_pre0416": "42.9% (3/7)",
+    "new_first_gen_pass_rate_0416plus": "30.0% (3/10)",
+    "is_20_consecutive_fails_statistically_abnormal": true,
+    "correction": "20+ consecutive FAILs NOT found in data. Max = 5 consecutive (occurred 3 times). 0416+ era has 19 FAILs total but 6 PASSes interrupt.",
+    "max_consecutive_fail_observed": 5,
+    "max_consecutive_fail_locations": [
+      "ATLAS-2026-0409-001 to 0409-005 (5 consecutive)",
+      "ATLAS-2026-0417-005 to 0417-009 (5 consecutive)",
+      "ATLAS-2026-0417-014 to 0417-018 (5 consecutive)"
+    ],
+    "current_streak": 3,
+    "pass_rate_0416plus_pct": 24.0,
+    "pass_rate_0409_0412_pct": 52.9,
+    "statistical_test": "Z=0.55, p=0.58, NOT significant (small sample)"
+  },
+  "param_sensitivity_duration_analysis": {
+    "gen023_total_params": 21,
+    "gen023_skip_list_removals": 6,
+    "skip_params_removed": [
+      "bb_period",
+      "atr_period",
+      "adx_period",
+      "atr_sl_multiplier",
+      "atr_tp_multiplier",
+      "pip_size"
+    ],
+    "gen023_expected_analyzed_params": 15,
+    "avg_duration_per_analyzed_param_sec": 66.4,
+    "gen023_expected_duration_sec": 1026,
+    "gen023_expected_duration_min": 17.1,
+    "claimed_hang_duration_min": 15,
+    "is_hang_within_normal_range": true,
+    "verdict": "15 minutes is 88% of expected 17.1 minutes. Classified as normal operation, not a hang."
+  },
+  "gen023_statistical_validity": {
+    "sharpe": 0.447,
+    "trades": 66,
+    "sharpe_se": 0.129,
+    "sharpe_95ci": [
+      0.194,
+      0.7
+    ],
+    "t_stat_vs_zero": 3.46,
+    "z_score_vs_l1_threshold_0_3": 1.14,
+    "is_significantly_above_threshold": false,
+    "verdict": "Sharpe=0.447 is significantly > 0 (t=3.46) but NOT significantly > L1 threshold of 0.3 (Z=1.14 < 1.96). Statistical artifact risk cannot be excluded."
+  }
+}

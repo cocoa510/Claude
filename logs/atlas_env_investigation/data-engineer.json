@@ -1,0 +1,130 @@
+{
+  "agent": "data-engineer",
+  "investigation_window": "ATLAS-2026-0418-004 (EUR_USD M15 volatility, BB Squeeze Breakout) L1 PASS 後の param sensitivity hang 原因調査",
+  "summary": "市場データ parquet 5 ファイルは全てクリーン (NaN=0 / 重複=0 / 異常価格=0 / 時刻差異常=0)。EUR_USD_M15 primary は 74,569 bars (1.80MB) で他通貨ペアより小さい。EUR_USD_M15_secondary は 99,625 bars (2.49MB) で primary の 1.34 倍。二重読み込みはバグではなく仕様通り (primary BT + secondary BT で計 2 回)。ハング主因の有力候補は L1 の _analyze_param_sensitivity で、この戦略の numeric parameter 15 個 × 3 perturbation = 45 回の full IS BT が走り、各 BT が戦略内の毎バー sorted(deque(maxlen=96)) を実行するため計算時間が爆発している可能性が最も高い。",
+  "findings": [
+    {
+      "id": "DE-001",
+      "severity": "low",
+      "area": "parquet_loader",
+      "title": "「Parquet読み込み完了」が 2 回出力されるのはバグではなく仕様",
+      "description": "runner.py は (a) prepare_data 内で primary parquet を 1 回、(b) Layer 2 完了後に secondary parquet を 1 回、個別にロードする。load_from_parquet は単一の logger.info('Parquet読み込み完了', ...) 呼び出しを 324 行目に持ち、キャッシュもメモ化も無い。MTFBundle 戦略なら更に load_multiple_timeframes 側でも primary を再ロードして 3 回出る可能性があるが、0418-004 は metadata.mtf が無いため MTF 経路に入らない。よって「2 回」は primary + secondary の BT サイクルが両方走った証拠であり、ハング時点では L1 PASS → Layer 2 完了 → secondary BT に入っていたと推測できる。",
+      "evidence": [
+        "atlas/backtest/data_loader.py:298-329 load_from_parquet の定義（logger.info 1 箇所のみ）",
+        "atlas/backtest/runner.py:252 prepare_data 内で primary を load_from_parquet",
+        "atlas/backtest/runner.py:686 secondary BT 分岐で variant='secondary' で再 load_from_parquet",
+        "strategies/ATLAS-2026-0418-004/metadata.json には mtf: true がないため MTF 経路は無効"
+      ],
+      "suggested_fix": "仕様通りで修正不要。ただしログメッセージに variant=primary/secondary を明示するとオペレータの誤解を防げる（現状は variant=primary のみ ctx に渡されており variant=secondary も同じ文言で出るため区別しにくい）。"
+    },
+    {
+      "id": "DE-002",
+      "severity": "healthy",
+      "area": "data_quality",
+      "title": "EUR_USD_M15 parquet 品質は完全クリーン",
+      "description": "pandas で直接読み込み検証した結果、EUR_USD_M15 primary / EUR_USD_M15_secondary / USD_JPY_M15 / EUR_JPY_M15 / GBP_USD_M15 いずれも NaN=0 件、timestamp 重複=0 件、zero price=0 件、high<low=0 件、時刻差 min=900s (=15分) max=260100s (週末 72h 以内) で異常なし。ハング原因が『データ破損により読み込みが無限ループ』である可能性は排除できる。",
+      "evidence": [
+        "data/market/EUR_USD_M15.parquet: size=1,802,646 bars=74,569 md5=fef957489e52 range=2023-04-12 02:45 UTC -> 2026-04-10 20:45 UTC nan_ohlc=0 dup_ts=0 zero_px=0 hl_inv=0",
+        "data/market/EUR_USD_M15_secondary.parquet: size=2,488,705 bars=99,625 md5=3d032eaaed63 range=2019-01-01 -> 2022-12-30 nan_ohlc=0 dup_ts=0",
+        "data/market/USD_JPY_M15.parquet: bars=74,523 nan_ohlc=0 dup_ts=0",
+        "data/market/EUR_JPY_M15.parquet: bars=99,530 nan_ohlc=0 dup_ts=0 (4年分、EUR_USD より大きい)",
+        "data/market/GBP_USD_M15.parquet: bars=74,556 nan_ohlc=0 dup_ts=0"
+      ],
+      "suggested_fix": "データ層に問題なし。修正不要。"
+    },
+    {
+      "id": "DE-003",
+      "severity": "high",
+      "area": "parquet_loader",
+      "title": "EUR_USD_M15 primary (74,569 bars) は他ペアより『大きくない』 — 特異に重いのはむしろ secondary (99,625 bars)",
+      "description": "ユーザー仮説の『EUR_USD_M15 の bars 数が異常に大きい』は誤り。EUR_USD M15 primary は 74,569 bars で USD_JPY (74,523), GBP_USD (74,556) とほぼ同じ（3年分）。特異なのは『EUR_USD_M15_secondary が 99,625 bars で 4 年分』で、これは Gate #14 の 2019-2022 secondary BT 用。過去の正常完了した戦略（USD_JPY BT Gen021/022 の 28-34 秒）と比較して、0418-004 が hang するのは primary データサイズではなく、L1 PASS 後の追加フェーズ（L2 full + WFA + secondary full + param sensitivity）が重なった結果と考えるのが自然。",
+      "evidence": [
+        "EUR_USD_M15 primary bars=74,569, secondary bars=99,625 (1.34倍)",
+        "USD_JPY_M15 primary bars=74,523 (0418-004 と同規模)",
+        "戦略 ATLAS-2026-0417-011/012/013 (EUR_USD M15) は過去に正常完了しており parquet サイズは同じ",
+        "atlas/backtest/runner.py:675-744 secondary BT は L2 error=None のときのみ走るため、L1 PASS 時だけ発動するフェーズ",
+        "atlas/backtest/data_loader.py:313-336 split_secondary_is_oos (固定 2021-01-01 分割)"
+      ],
+      "suggested_fix": "parquet サイズに起因しない。DE-004/DE-005 の感度分析コストが真因候補。ただし secondary full BT も 99k bars を処理するため、L1 PASS 戦略では約 1.3 倍の処理時間が追加される点を実行時間見積もりに考慮すべき。"
+    },
+    {
+      "id": "DE-004",
+      "severity": "critical",
+      "area": "param_sensitivity",
+      "title": "L1 _analyze_param_sensitivity の対象スコープと戦略内 O(N log N) 実装が直交して爆発計算量を生む",
+      "description": "_SENSITIVITY_SKIP_PARAMS は rsi_period/adx_period/bb_period/atr_period/ema_period/sma_period/macd_* のみスキップ対象だが、戦略 0418-004 が使う『squeeze_lookback=96』『atr_sma_window=20』『ema_trend_period=50』は対象外（名前が合わない）。結果、 numeric_params に 15 個が入り、perturbations (0.9/1.0/1.1) × 15 = 45 回の IS full BT が走る。さらに戦略 generate_signal() は毎バー self._squeeze_threshold() → sorted(self._bb_width_window) を O(squeeze_lookback log squeeze_lookback) で実行するため、IS 期間 ~60k bars × 96 log 96 ≒ 39 × 10^6 比較演算。これを 45 回繰り返すと O(10^9) オーダーの sort 処理となり、単一 BT 30 秒の戦略でも感度分析だけで 20 分超に膨らむ。『2 回試行で同じ param sensitivity フェーズで停滞』『Gen021/022 (別戦略) は 28-34 秒で完了』の両方を説明できる。",
+      "evidence": [
+        "atlas/backtest/vectorbt_engine.py:60-69 _SENSITIVITY_SKIP_PARAMS 定義（ema_trend_period / atr_sma_window / squeeze_lookback は含まれない）",
+        "atlas/backtest/vectorbt_engine.py:668-672 numeric_params フィルタ条件 (isinstance(v, (int,float)) かつ not in SKIP)",
+        "atlas/backtest/vectorbt_engine.py:684 perturbations = [0.9, 1.0, 1.1]",
+        "atlas/backtest/vectorbt_engine.py:688-715 param × mult 二重ループ、各 mult で _generate_signals_vectorized + _run_vectorbt_portfolio 実行",
+        "strategies/ATLAS-2026-0418-004/strategy.py:215-229 _squeeze_threshold() が毎バー sorted(self._bb_width_window) を実行",
+        "strategies/ATLAS-2026-0418-004/config.json: squeeze_lookback=96, atr_sma_window=20, ema_trend_period=50 (全て非スキップ)",
+        "config numeric 計数: {bb_std_dev, atr_sma_window, ema_trend_period, squeeze_lookback, squeeze_quantile, atr_expansion_ratio, min_atr, min_adx, breakout_buffer, max_hold_bars, cooldown_bars, position_size_ratio, session_start_utc, session_end_utc, enable_session_filter} = 15 個",
+        "atlas/backtest/vectorbt_engine.py:717-719 MAX_PARAM_COMBINATIONS=200 ガードは all_scores が param 完了後にのみ append されるため、内側 mult ループから抜けるだけで外側 param ループは止まらない（設計バグの可能性）"
+      ],
+      "suggested_fix": "修正は実装担当に任せる。候補案のみ列挙: (a) _SENSITIVITY_SKIP_PARAMS に squeeze_lookback/atr_sma_window/ema_trend_period/ema_period/atr_sma_window 等のローリング窓パラメータを追加、(b) 戦略側で self._bb_width_window を SortedList (bisect) 化して O(log N) insert にする、(c) _analyze_param_sensitivity にグローバル time budget (例: 120秒) を設けて超過時 partial 結果で return、(d) MAX_PARAM_COMBINATIONS ガードを外側 param ループの先頭に移して実際に total BT 数を制限する。"
+    },
+    {
+      "id": "DE-005",
+      "severity": "medium",
+      "area": "param_sensitivity",
+      "title": "enable_session_filter=True が bool だが isinstance(True,int) で numeric 判定を通過し無意味な 3 BT を消費",
+      "description": "Python では isinstance(True, int) == True のため、config.parameters の enable_session_filter=True が numeric_params に含まれる。base_value=True, mult=0.9/1.0/1.1 で new_value = True*mult = 0.9/1.0/1.1 だが、isinstance(True, int) が成立するため max(1, int(round(0.9))) = 1 となり 3 perturbation 全てで value=1 のまま。シグナル結果も同一 3 件で sharpe の std=0、CV=0 を得るだけ。3 回分の full IS BT (各 74k bars のループ) が純粋に無駄に消費される。0418-004 戦略の 45 BT のうち 3 回（6.7%）がこれに該当。",
+      "evidence": [
+        "atlas/backtest/vectorbt_engine.py:670 isinstance(v, (int, float)) フィルタに bool 除外なし",
+        "strategies/ATLAS-2026-0418-004/config.json:31 \"enable_session_filter\": true",
+        "Python: isinstance(True, int) is True, True * 0.9 == 0.9"
+      ],
+      "suggested_fix": "numeric_params フィルタで `and not isinstance(v, bool)` を追加する。影響は感度分析コストの微削減のみで、メトリクス値には影響しない ([refactor] 扱い可能)。"
+    },
+    {
+      "id": "DE-006",
+      "severity": "low",
+      "area": "data_quality",
+      "title": "check_data_quality は single-pass O(N) で無限ループの余地なし",
+      "description": "data_loader.check_data_quality は time_diffs.diff() + enumerate の単純 O(N) スキャン、異常値チェックも pandas ベクトル化。無限ループ・非終了分岐はない。prepare_data (primary) と secondary BT 前 (variant='secondary') で計 2 回呼ばれるが合計 ~1 秒未満。ハング原因ではない。",
+      "evidence": [
+        "atlas/backtest/data_loader.py:333-440 check_data_quality 全体が単一 for ループ + ベクトル化",
+        "atlas/backtest/data_loader.py:369 enumerate(time_diffs) で O(N) 単一走査",
+        "atlas/backtest/runner.py:260 prepare_data 内で 1 回目呼び出し",
+        "atlas/backtest/runner.py:692 secondary BT 前で 2 回目呼び出し"
+      ],
+      "suggested_fix": "修正不要。"
+    },
+    {
+      "id": "DE-007",
+      "severity": "low",
+      "area": "schema_version",
+      "title": "METRICS_SCHEMA_VERSION 4.7.0 変更は result_parser.py の fill_rate 計算のみで BT 実行ロジックに影響しない",
+      "description": "最新変更コミット a542448 (2026-04-18 10:33) は fill_rate 分母を len(equity_curve) から data_bars に置換するだけ。result_parser は L2 完了後の後処理で、param sensitivity フェーズ中のハングには寄与しない。defaults.py は METRICS_SCHEMA_VERSION 文字列のバンプのみ。データ層との連動もなし。",
+      "evidence": [
+        "git show a542448 -- atlas/backtest/result_parser.py:47-53 のみ変更",
+        "atlas/config/defaults.py:17 METRICS_SCHEMA_VERSION: Final[str] = '4.7.0'",
+        "atlas/backtest/event_simulator.py / vectorbt_engine.py にこのコミットでの変更なし"
+      ],
+      "suggested_fix": "修正不要。"
+    },
+    {
+      "id": "DE-008",
+      "severity": "medium",
+      "area": "parquet_loader",
+      "title": "data_loader.py は過去 1 ヶ月以上無変更 — ハング原因として新規バグの余地は低い",
+      "description": "atlas/backtest/data_loader.py の最終変更は 2026-04-15 (c885612 FTS-DATA-011 align_to_primary の allow_exact_matches=False)。MTF 戦略でない 0418-004 には影響しない。それ以前は第7次監査 (bccabd4, 0f1d3e8) で 4月初旬の変更。直近 3 日間のコミットで data_loader.py はノータッチ。今回のハングが data_loader の regression で発生した可能性は低い。",
+      "evidence": [
+        "git log atlas/backtest/data_loader.py 最新 = c885612 [change:spec] FTS-DATA-011 2026-04-15",
+        "0418-004 戦略は mtf: true 未設定のため align_to_primary 経路には入らない",
+        "0418-001/002/003 (直近 3 戦略) は L1 FAIL で早期終了しており同経路を通っている"
+      ],
+      "suggested_fix": "修正不要。"
+    }
+  ],
+  "data_integrity_status": "healthy",
+  "parquet_loader_concerns": [
+    "Parquet読み込み完了 が 2 回出力されるのはバグではなく、primary BT + secondary BT の 2 サイクル実施に伴う仕様通りの出力。MTF 戦略ならさらに auxiliary TF で 1-2 回追加される。",
+    "EUR_USD_M15 primary (74,569 bars) は他通貨ペアと同規模で異常なし。EUR_USD_M15_secondary (99,625 bars) は primary の 1.34 倍のため L1 PASS 時の secondary BT は約 1.3 倍の時間を要する。",
+    "load_from_parquet にキャッシュは実装されていないが、ハングには寄与していない（2 回読み込みの合計は数百 ms 未満）。",
+    "戦略 0418-004 のハング真因は、L1 param sensitivity での 15 parameters × 3 perturbations = 45 BT と、戦略内部の毎バー sorted(deque) O(N log N) が組み合わさった計算量爆発と推定。データ層の問題ではない。"
+  ],
+  "recommendation_priority": "DE-004 (critical) を最優先。L1 param sensitivity のスコープ拡大＋戦略側の O(N log N) sort が掛け算で爆発する構造問題で、今後 ATR/BB/rolling window 系のパラメータを持つ戦略が L1 PASS すると同じハングが再発する。短期対処は _SENSITIVITY_SKIP_PARAMS への `squeeze_lookback`/`atr_sma_window`/`ema_trend_period`/任意の lookback/window 系名称の追加、中期対処は _analyze_param_sensitivity にタイムバジェットガード (例: 120 秒) を入れて partial 結果で return する改修。DE-005 (bool→int fall-through) は同箇所の改修と同時にパッチすれば [refactor] で処理できる。データ層自体には改修不要 (DE-002 / DE-006 / DE-007 / DE-008)。"
+}

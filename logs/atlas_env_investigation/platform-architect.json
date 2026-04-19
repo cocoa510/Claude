@@ -1,0 +1,135 @@
+{
+  "agent": "platform-architect",
+  "scope": "ATLAS BT engine structural investigation (param sensitivity hang, read-only)",
+  "evidence_context": {
+    "gen023_actual_id": "ATLAS-2026-0417-019",
+    "gen023_l1_duration_sec": 967.14,
+    "gen023_l1_result": "PASSED (PF=1.0716, Sharpe=0.3478)",
+    "gen023_analyzed_params": 14,
+    "gen023_data_bars": 74556,
+    "gen021_gen022_duration_range": "28-34s (direct L1 only, no full sensitivity completion on one FAIL-early path)",
+    "latest_failing_ex": "ATLAS-2026-0418-003 (Gen22, L1 FAIL at Sharpe check, 33.88s — sensitivity skipped via PF<1.0 branch)"
+  },
+  "findings": [
+    {
+      "id": "PA-001",
+      "severity": "critical",
+      "area": "param_sensitivity",
+      "title": "パラメータ感度分析がPythonレベル逐次ループで O(P × K × N) を全数回す — 14 params × 3 perturbations × 99,530 bars = ~4.2M 回の generate_signal() 呼び出しで 15 分ハングの直接原因",
+      "description": "`_analyze_param_sensitivity` は各パラメータを ±10% 変動させ、各変動ごとに `_generate_signals_vectorized` を丸ごと再実行する。内部ループ `for i in range(len(df)): bar = df.iloc[i][_bar_cols]` が M15 (約10万バー) でバー単位の Python 実行となり、単発 BT 約 28 秒、感度分析 (14 params × 3 points) で 42 × 23 ≒ 16 分は数値的に整合。Gen021/022 が 28-34 秒で済むのはいずれも L1 最低基準 (trades/PF/Sharpe) で早期に FAIL したため感度分析に到達しなかったから。Gen023 のみが L1 PASS したため感度分析フェーズに入って 967 秒 (≒ 16 分) 要した。",
+      "evidence": [
+        "atlas/backtest/vectorbt_engine.py:688-719 (sensitivity loop)",
+        "atlas/backtest/vectorbt_engine.py:135-226 (per-bar Python loop inside _generate_signals_vectorized)",
+        "atlas/backtest/vectorbt_engine.py:703-708 (毎 perturbation で _generate_signals_vectorized + _run_vectorbt_portfolio 丸ごと再実行)",
+        "strategies/ATLAS-2026-0417-019/backtest/result.json:197 (duration_sec=967.14, analyzed=14)",
+        "strategies/ATLAS-2026-0417-019/backtest/result.json:194-195 (param_count=14 analyzed_count=14)"
+      ],
+      "suggested_fix": "(1) 戦略側のシグナル計算は 95% が周期インジケータ (EMA/RSI/ATR) の再計算。これは `_SENSITIVITY_SKIP_PARAMS` の範疇外で変動させても意味があるのは確認バー系のみ。感度分析 params を L1 のトレードロジック閾値 (rsi_threshold_long / atr_expansion_ratio / adx_max / cooldown_bars / min_atr / max_hold_bars 等) に限定する whitelist 方式へ転換。(2) 感度分析は個別に `asyncio.get_event_loop().run_in_executor()` + ProcessPoolExecutor でバッチ並列化すれば 14 → 4 コアで 4-5 倍高速化可能。(3) ループ開始時刻を記録し、累積 wall time が threshold (例: 300 秒) を超えたら残 params の CV 評価を打ち切り `analyzed_count` のみ減らす (Gate は '未評価＝不合格' を受け取るため問題ない)。"
+    },
+    {
+      "id": "PA-002",
+      "severity": "critical",
+      "area": "timeout",
+      "title": "BT runner / main.py / vectorbt_engine のどの階層にも wall-clock タイムアウトが存在しない — 無限ハングを検出できない",
+      "description": "`atlas/main.py:259` で `asyncio.run(run_backtest(...))` を呼ぶが、`asyncio.wait_for` でラップしていない。`run_layer1` 内の感度分析ループも時間監視なし。`_analyze_param_sensitivity` 内の `if len(all_scores) > MAX_PARAM_COMBINATIONS: break` は上限 200 に対し実測 14 件しか出ないため事実上ノーガード。結果として atlas-loop が 15 分以上停止してもプロセスは終了せず、コンテキスト (5 時間 MAX) を静かに消費する。",
+      "evidence": [
+        "atlas/main.py:40-42 (_run_async は単純 asyncio.run、タイムアウトなし)",
+        "atlas/main.py:259 (backtest CLI タイムアウトラップなし)",
+        "atlas/backtest/vectorbt_engine.py:688-719 (感度ループに時間チェックなし)",
+        "atlas/backtest/vectorbt_engine.py:56-57 (MAX_PARAM_COMBINATIONS=200 はループ継続条件にほぼ効かない)",
+        "atlas/backtest/vectorbt_engine.py:717-719 (`if len(all_scores) > 200: break` は 14 で達する前に break しない)"
+      ],
+      "suggested_fix": "(1) `main.py` の backtest/metrics/score サブコマンドを `asyncio.wait_for(run_backtest(...), timeout=600)` で包む (10 分上限)。(2) `_analyze_param_sensitivity` 先頭で `t_start = time.perf_counter()`、各 param 終了ごとに 300 秒超過で `logger.warning('sensitivity time budget exceeded', analyzed=N)` を出して break。(3) CLAUDE.md の無限ループ安全停止 (282 分で停止) と同設計を BT 単発にも適用。"
+    },
+    {
+      "id": "PA-003",
+      "severity": "high",
+      "area": "param_sensitivity",
+      "title": "boolean パラメータが isinstance(True, int)==True により numeric として扱われ、3 回の完全 BT が全く同一値で無駄に回る",
+      "description": "line 668-672 の numeric_params フィルタは `isinstance(v, (int, float)) and v != 0`。Python の仕様で `isinstance(True, int) == True` のため `enable_atr_expansion_filter=True`, `enable_session_filter=True` も numeric 扱い。line 695-696 で `int(round(True*0.9))=1`, `int(round(True*1.1))=1`、base(True)を数値 1 として扱うため、3 perturbation すべてで同じ動作 (bool(1)=True) → 感度 3 回 = 完全冗長。Gen023 結果で `enable_atr_expansion_filter`/`enable_session_filter` の sharpes が [0.3478, 0.3478, 0.3478] で std=0 になっているのが物証。",
+      "evidence": [
+        "atlas/backtest/vectorbt_engine.py:668-672 (numeric_params = isinstance(v, (int, float)) ...)",
+        "atlas/backtest/vectorbt_engine.py:694-697 (int → max(1, int(round(new_value))))",
+        "strategies/ATLAS-2026-0417-019/backtest/result.json:171-192 (enable_atr_expansion_filter/enable_session_filter が [0.3478]×3 std=0)"
+      ],
+      "suggested_fix": "フィルタを `type(v) in (int, float) and v != 0 and not isinstance(v, bool)` に修正するか、明示的に `isinstance(v, bool)` をスキップ条件に追加。同様に `position_size_ratio=0.012` / `min_atr=0.0002` のような極小 float もスキップ検討 (これらも perturbation で同一結果 [0.3478]×3 に収束しており無駄)。"
+    },
+    {
+      "id": "PA-004",
+      "severity": "high",
+      "area": "vectorbt_engine",
+      "title": "_generate_signals_vectorized のバーループが pandas.iloc による行単位アクセスで遅い (BT 1回約 28 秒の主因)",
+      "description": "line 135-226 のメインループで `bar = df.iloc[i][_bar_cols]` をバーごとに実行。`.iloc[i]` は新たな Series を作成 + `[_bar_cols]` でさらに sub-Series 化する 2 段階構築で、10 万バーで 20 万回のオブジェクト生成が走る。さらに `raw_entries.iloc[i] = True`, `raw_exits.iloc[i] = True` (line 193/203/216/217) も pandas setitem で非効率。`_SimpleFeatureStore.get()` (line 386-391) も毎バー `self._features[name].iloc[bar_index]` を呼び辞書に畳み込む (line 393-395) → これが `features` dict 構築で再度 N×F 回の iloc 呼び出しを発生させている。",
+      "evidence": [
+        "atlas/backtest/vectorbt_engine.py:135-136 (for i in range(len(df)): bar = df.iloc[i][_bar_cols])",
+        "atlas/backtest/vectorbt_engine.py:193,203,216,217 (raw_entries/exits.iloc[i] = True)",
+        "atlas/backtest/vectorbt_engine.py:386-395 (_SimpleFeatureStore.get_all: dict 内包表記で iloc 連打)"
+      ],
+      "suggested_fix": "(1) ループ外で numpy 配列に変換: `open_arr = df['open'].values; high_arr = df['high'].values; ...`、バー内ではインデックスアクセス `open_arr[i]` に切替。(2) raw_entries/exits を np.zeros(len(df), dtype=bool) に変更し末尾で pd.Series 化。(3) _SimpleFeatureStore も内部で numpy 配列を保持し get_all は dict comprehension で features_values[name][i] を返す構造へ。これで BT 1 回を 28s → 数秒まで圧縮可能、感度分析も連動で短縮。"
+    },
+    {
+      "id": "PA-005",
+      "severity": "medium",
+      "area": "param_sensitivity",
+      "title": "整数パラメータの rounding で隣接 perturbation が重複値になり重複 BT が走るケースがあるが短絡されない",
+      "description": "line 695-696 `if isinstance(base_value, int): new_value = max(1, int(round(new_value)))`。例えば `cooldown_bars=2` → 0.9*2=1.8→2, 1.0*2=2, 1.1*2=2.2→2 で 3 perturbation 全てが 2 に丸まる。ループは `if new_value == base_value: skip` をしないため同じ BT を 3 回走らせる。14 params のうち小整数が多い戦略 (例: 0418-004 の `cooldown_bars=4`, `atr_period` 等) ではその数が増え、Gen023 の sharpes=[0.3478, 0.3478, 0.3478] 出力はまさにこの現象。",
+      "evidence": [
+        "atlas/backtest/vectorbt_engine.py:691-702 (perturbation ループに重複検出なし)",
+        "strategies/ATLAS-2026-0417-019/backtest/result.json:94-103 (min_atr の 3 sharpe 同値)",
+        "strategies/ATLAS-2026-0417-019/backtest/result.json:160-169 (position_size_ratio の 3 sharpe 同値)"
+      ],
+      "suggested_fix": "perturbation ループ内で `modified_params[param_name]` が base_value と一致した場合は base BT 結果を再利用する (メモ化) か skip する。これだけで perturbation 数が半減する戦略が存在する (特に cooldown_bars, atr_period 系)。"
+    },
+    {
+      "id": "PA-006",
+      "severity": "medium",
+      "area": "param_sensitivity",
+      "title": "離散セッション系パラメータ (session_start_utc など) を連続比例摂動することは意味がなく、かつ動作を大幅変化させ BT コストを増大させる",
+      "description": "`session_start_utc=6` を 0.9/1.1 倍 → 5, 7 は『UTC 05 時に市場を開く』という離散切替であり、連続感度分析の前提 (パラメータのわずかな変動で指標がわずかに変化) に反する。結果 sharpes=[0.3478, 0.3478, 0.6707] (Gen023 の session_end_utc は [-0.1884, 0.3478, 0.2593]) のように極端に飛び、CV が誤って高感度と判定される (GATE_MAX_PARAM_SENSITIVITY=0.5 を誤って落とす)。加えて時間帯が拡大するとトレード数が増え BT 実行時間も比例して長くなる。",
+      "evidence": [
+        "atlas/backtest/vectorbt_engine.py:60-69 (_SENSITIVITY_SKIP_PARAMS に session/enable 系が含まれていない)",
+        "strategies/ATLAS-2026-0417-019/backtest/result.json:116-137 (session_start_utc / session_end_utc の sharpe 分散が異常)"
+      ],
+      "suggested_fix": "`_SENSITIVITY_SKIP_PARAMS` に離散型パラメータを追加: `session_start_utc`, `session_end_utc`, `enable_*`, `squeeze_lookback`, `max_hold_bars`, `cooldown_bars` 等。戦略側 config に `_sensitivity_analyzable: list[str]` メタを追加して whitelist 方式に転換するのが筋。"
+    },
+    {
+      "id": "PA-007",
+      "severity": "medium",
+      "area": "runner",
+      "title": "run_backtest のセカンダリ期間 L2 + Monte Carlo + duplicate check が Gate FAIL 後も実行され、合計時間がさらに伸びる",
+      "description": "line 619-641 で L1 FAIL → Layer 2 スキップは効くが、`run_layer1` そのものが感度分析まで進んでから FAIL を返すパスでは既に 15 分消費済み。また Gen023 のように L1 PASS で L2 まで進むと `split_secondary_is_oos` + L2 BT 再実行 + Monte Carlo + duplicate check が直列に加わる。main.py 側でのタイムバジェット管理がないため『L1 が重くなると全体がさらに雪だるま式に悪化』する。",
+      "evidence": [
+        "atlas/backtest/runner.py:619-641 (L1 FAIL なら L2 skip、ただし L1 自体が感度分析で詰まる)",
+        "atlas/backtest/runner.py:672-753 (secondary_period BT は L2 成功後に追加実行)",
+        "atlas/backtest/runner.py:662-670 (Monte Carlo 追加実行)",
+        "atlas/backtest/runner.py:841-870 (duplicate check 追加実行)"
+      ],
+      "suggested_fix": "run_backtest 先頭で `overall_deadline = time.perf_counter() + 900` (15 分上限) を定義し、L1 完了時 / L2 完了時 / secondary 開始前に残予算をチェックして超過なら各段階をスキップ + `result.gate_check['deadline_exceeded']=True` を記録。Gate は未評価扱いとなり自動 FAIL するため安全。"
+    },
+    {
+      "id": "PA-008",
+      "severity": "low",
+      "area": "vectorbt_engine",
+      "title": "vectorbt.Portfolio.from_signals の計算量は取引シグナル密度に線形で、O(N²) 切替ではないため 'vectorbt が急に遅くなる' 仮説は棄却",
+      "description": "vectorbt の `from_signals` は内部 Numba JIT で compile 済み。入力 entries/exits が bool 配列、sl_stop/tp_stop が float 配列であれば O(N) で走る。shape が異なるとキャッシュミスで再 compile するが、shape は同じ (len(df)) ため再 compile は発生しない。観測した 15 分は vectorbt 内部ではなく、その外側の Python ループ (PA-001/PA-004) で消費されている。",
+      "evidence": [
+        "atlas/backtest/vectorbt_engine.py:582-598 (from_signals 呼び出し kwargs は固定 shape)",
+        "atlas/backtest/vectorbt_engine.py:600 (total_trades = int(pf.trades.count()) は trades レコードの単純イテレーション)"
+      ],
+      "suggested_fix": "vectorbt 側の最適化は不要。ボトルネックは _generate_signals_vectorized の pandas iloc ループ (PA-004) と感度分析の全数探索 (PA-001) に集約される。"
+    }
+  ],
+  "param_sensitivity_complexity": "O(P * K * N) where P=analyzed params (14 for Gen023), K=perturbation points (3), N=bars (~99,530 for M15 4y data). Effective Python-level iterations: ~4.18M per sensitivity analysis. vectorbt 内部はそれとは別に O(N) だが定数係数が小さく無視可能。",
+  "timeout_mechanism_exists": false,
+  "hang_root_cause_hypothesis": "Gen023 (ATLAS-2026-0417-019) が L1 最低基準を通過して感度分析フェーズに到達したこと + M15 4年データ (99,530 bars) + 14 個の『numeric+非ゼロ』パラメータが全数 3 点摂動の対象になったことの三重奏。バー単位 Python ループ + pandas.iloc による行アクセスで BT 単発 28 秒、3×14=42 BT 直列 → 16 分。タイムアウト機構が皆無のため atlas-loop はこの 16 分を毎回完走してからようやく次へ進む。Gen021/022 はそもそも L1 早期 FAIL で感度分析に到達しなかったため 28-34 秒で終わっただけ。同条件で Gen023 相当の戦略が再び出現すれば、L1 PASS であれば必ず同じハングが再現する。",
+  "bt_architecture_concerns": [
+    "A1: ランタイムに wall-clock タイムアウトが一切存在せず、主要3段階 (L1感度分析 / L2 / secondary L2) はいずれも独立して数十分〜無限の可能性。atlas-loop の進捗が不透明。",
+    "A2: _generate_signals_vectorized のメインループが pandas.iloc 行単位で毎バー新 Series を生成しており、名前と裏腹に『ベクトル化』されていない (事実上 per-bar Python)。numpy 配列化で 5-10倍は縮まる。",
+    "A3: 感度分析のパラメータ選択が『整数または非ゼロ float』という緩すぎるフィルタで、bool / 離散型 (session_*, enable_*) / 影響ゼロ (min_atr 等) を含んで無駄 BT が発生。whitelist 方式にリファクタが必要。",
+    "A4: 感度分析が逐次実行。CPU コアが遊んでおり、ProcessPoolExecutor に各 param をディスパッチすれば 4コアで 3.5倍高速化可能 (asyncio.to_thread だと GIL で並列化不可、ProcessPool 必須)。",
+    "A5: 同一 param 値の重複 perturbation (int 丸めで base と一致) を短絡していないため 3 回分の冗長 BT が常時発生。14 params で平均 1-2 件発生 → 5-10% の浪費。",
+    "A6: L1 感度分析のタイムアウト / 中断フラグが Gate 判定側に伝達されておらず、途中打ち切りした場合に『未評価＝不合格』と扱うフォールバック経路のみ存在する (runner.py:760-764 param_sensitivity None 処理はあるので OK)。ただし『途中まで評価できた』情報が捨てられるのはもったいない。",
+    "A7: secondary_period_layer2 と Monte Carlo と duplicate check は Gate PASS 時のみ呼ばれるべきだが、現状は L2 成功時にすべて直列実行される。Gate FAIL 確定後なら secondary / Monte Carlo を省略できる（ただし Gate 条件 #14 が secondary_period を要求しているため同時実行が必要 — この依存関係は設計由来で変更難易度 medium）。",
+    "A8: loop_metrics.csv は BT 全体時間のみ記録で感度分析 sub-phase 時間を記録していない。ハング再現時の切り分け不能（原因層の特定に別計測が必要）。"
+  ]
+}

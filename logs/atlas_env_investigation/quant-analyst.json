@@ -1,0 +1,138 @@
+{
+  "agent": "quant-analyst",
+  "investigation_date": "2026-04-18",
+  "metrics_schema_version_current": "4.7.0",
+  "scope": "L1 vectorbt_engine.py / L1 thresholds / Sharpe calc / param sensitivity / schema drift",
+  "findings": [
+    {
+      "id": "QA-001",
+      "severity": "critical",
+      "area": "schema_drift",
+      "title": "Schema 1.x to 4.x changes deflated L1 Sharpe distribution by ~1.16 points; L1 threshold became de-facto stricter",
+      "description": "L1 results compared between schema 1.x (n=38) and 4.x (n=24) show avg L1 Sharpe collapsed from 0.924 to -0.237. Same L1_MIN_SHARPE=0.3 threshold yields 97.4% pass-rate in 1.x but only 25.0% in 4.x. Root cause is calc-logic changes (especially commit a5406f5 position_returns to all returns = ~2.8x Sharpe deflation) plus cumulative effects of 4.5/4.6/4.7. Not a strategy quality regression.",
+      "evidence": [
+        "Schema 1.x strategies (n=38): avg sharpe=0.924, positive_count=37/38, L1 PASS rate=97.4%",
+        "Schema 4.x strategies (n=24): avg sharpe=-0.237, positive_count=10/24, L1 PASS rate=25.0%",
+        "Commit a5406f5 [change:spec] notes: Gate PASS to FAIL (Sharpe 1.17 to 0.42) confirming deflation acknowledged",
+        "Gen041 (champion) was schema 1.1.0 with L1 sharpe=0.7638, trades=107 PASS. Re-running on 4.7.0 estimated sharpe ~0.45-0.65; L1 PASS still likely but Gate L2 Sharpe>=0.8 borderline (L2 sharpe 1.16 to est ~0.85-0.95).",
+        "Schema 1.x sharpe max=1.67, 4.x max=1.02 - top-tier dropped 0.65 points too"
+      ],
+      "suggested_fix": "All-bar Sharpe is industry standard correct, but L1_MIN_SHARPE=0.3 is calibrated to 1.x distribution and now mismatched. Either lower L1_MIN_SHARPE to 0.15-0.20 to recalibrate to 4.x distribution (median+1sigma area), or explicitly document the metric definition shift in spec_change_log. Gate #3 (Sharpe>=0.8) likewise needs re-examination since Gen041 true value is now ~0.85-0.95. This is a [change:spec] item."
+    },
+    {
+      "id": "QA-002",
+      "severity": "high",
+      "area": "sharpe_calc",
+      "title": "L1 (vectorbt) vs L2 (event_simulator) Sharpe annualization base mismatch - L1 inflated by 1.185x",
+      "description": "vectorbt pf.sharpe_ratio() defaults to year_freq=365 days. With freq=15min/1h passed in, bars_per_year = 35040 (M15) or 8760 (H1). ATLAS L2 event_simulator uses BARS_PER_YEAR constant: M15=24960, H1=6240 (5-day workweek x 24h). L1 Sharpe is therefore inflated by ~sqrt(35040/24960) = 1.185x relative to L2 Sharpe.",
+      "evidence": [
+        "Runtime check: vbt.settings.returns year_freq = 365 days (calendar all-day)",
+        "atlas/config/defaults.py:211 BARS_PER_YEAR M15=24960 (52w*5d*24h*4), H1=6240 (52w*5d*24h)",
+        "Math: M15 -> vbt 35040, ATLAS 24960, sqrt ratio 1.185 ; H1 -> vbt 8760, ATLAS 6240, sqrt ratio 1.185",
+        "vectorbt_engine.py:629 raw_sharpe = float(pf.sharpe_ratio()) - no freq/year_freq override",
+        "Structural cause for L1 PASS but L2 FAIL pattern (L1 Sharpe 1.0 ~= L2 Sharpe 0.84, narrowly missing Gate>=0.8)"
+      ],
+      "suggested_fix": "Inject year_freq=BARS_PER_YEAR[tf] bars in _run_vectorbt_portfolio kwargs to align L1/L2 annualization. Alternative: post-hoc scale L1 Sharpe by 0.844. This is a [fix:bug] - Sharpe definition implicit schema drift between L1 and L2."
+    },
+    {
+      "id": "QA-003",
+      "severity": "medium",
+      "area": "threshold",
+      "title": "L1 threshold constants are hardcoded - separated from Gate thresholds in defaults.py",
+      "description": "L1_MIN_TRADES=20 / L1_MIN_PROFIT_FACTOR=0.8 / L1_MIN_SHARPE=0.3 are hardcoded in vectorbt_engine.py:52-54. Separated from defaults.py Gate constants (GATE_MIN_*), thus outside the change-management process and golden-test scope. This is a contributing factor to the silent accumulation of relative tightening through schema changes. Note: user prompt says L1 PF>=1.2 but actual threshold is 0.8 (Gate is 1.2).",
+      "evidence": [
+        "vectorbt_engine.py:52 L1_MIN_TRADES: int = 20 (Gate is 50)",
+        "vectorbt_engine.py:53 L1_MIN_PROFIT_FACTOR: float = 0.8 (Gate is 1.2)",
+        "vectorbt_engine.py:54 L1_MIN_SHARPE: float = 0.3 (Gate is 0.8)",
+        "Not Final-frozen, not part of Immutable Gate Protection Protocol",
+        "No L1 threshold change history in spec_change_log.md - audit blindspot"
+      ],
+      "suggested_fix": "Move L1 thresholds to defaults.py, mark Final, bring under metrics_schema_version management. Mandate change:spec procedure. This institutionalizes simultaneous re-calibration whenever Sharpe calc changes."
+    },
+    {
+      "id": "QA-004",
+      "severity": "medium",
+      "area": "sharpe_calc",
+      "title": "Low-trade strategies (Gen023=66 trades) are mathematically biased toward high Sharpe via all-bar denominator",
+      "description": "Sharpe = (mean_returns * N) / (std_returns * sqrt(N)) where N~99500 (M15 4yr). Non-position bars have return=0; fewer trades means more zeros dominating the distribution, smaller std, larger Sharpe. Conversely, 510-trade strategies amplify std with loss-trade variance and get strong negative Sharpe pressure. Simulation: 66 trades with 53% WR and R:R 2.3 -> Sharpe ~1.88; same edge with 500 trades -> 5.50; 510 trades with 33% WR and R:R 1.0 -> -4.57.",
+      "evidence": [
+        "Simulation (n_bars=99500, edge_per_trade=0.01%): 66trades/53WR/R=2.3 -> Sharpe=1.88, PF=2.44",
+        "Same design with 510 trades -> Sharpe=5.50, PF=2.59 (more trades = more statistically robust)",
+        "Failure pattern 510trades/33WR/R=1.0 -> Sharpe=-4.57, PF=0.49",
+        "Empirical Gen0418-002 (510trades) sharpe=-0.548, Gen0418-003 (185trades) sharpe=-0.132 - losing strategies pay double penalty via std inflation",
+        "Gen0410-015 (33trades) sharpe=1.173 PASS - real-world example of low-trade advantage"
+      ],
+      "suggested_fix": "Current all-bar Sharpe is industry standard but in ATLAS context produces sampling bias for low-trade strategies. (1) Gate min_trades=50 and min_trades_per_year=20 already mitigate. (2) Add weakness_detector signal: sharpe_per_trade = sharpe/sqrt(trades) as normalized indicator to flag undersampled strategies. (3) Document in weakness_detector that high L1 Sharpe with under 100 trades is suspicious, not laudable."
+    },
+    {
+      "id": "QA-005",
+      "severity": "low",
+      "area": "param_sensitivity",
+      "title": "L1 param sensitivity cost - effective 18-21 vbt runs (8-60 sec/strategy), skipped if PF<1.0 so low impact",
+      "description": "vectorbt_engine.py:_analyze_param_sensitivity uses perturbations=[0.9, 1.0, 1.1] (3 points) per numeric param. Even 15-param strategies reduce to ~6 effective via _SENSITIVITY_SKIP_PARAMS (sl/tp/period/multipliers excluded). 6 * 3 = 18 vbt runs. Each is ~50-70% of base BT time, totaling 18-60 sec. Skipped if pf<1.0 (vectorbt_engine.py:848), so under current failure-heavy state most strategies skip sensitivity entirely.",
+      "evidence": [
+        "vectorbt_engine.py:684 perturbations=[0.9, 1.0, 1.1]",
+        "vectorbt_engine.py:60-69 _SENSITIVITY_SKIP_PARAMS excludes 9 types (sl/tp/period/multipliers)",
+        "vectorbt_engine.py:848 if pf<1.0 skip logic",
+        "MAX_PARAM_COMBINATIONS=200 cap (vectorbt_engine.py:57)",
+        "L1 duration observed 27-34 sec (Gen0418-001/002/003) with no sensitivity executed"
+      ],
+      "suggested_fix": "No major issue. perturbations=[0.9, 1.0, 1.1] (3pts) yields low CV statistical reliability (L2 raised to 5pts in 4.6.0). Consider raising L1 to [0.85, 0.93, 1.0, 1.07, 1.15] (5pts) - cost goes 6*3=18 to 6*5=30 (1.7x) acceptable at L1 scale."
+    },
+    {
+      "id": "QA-006",
+      "severity": "high",
+      "area": "schema_drift",
+      "title": "METRICS_SCHEMA_VERSION 4.6.0 to 4.7.0 only touches fill_rate (no Sharpe impact), but 4.5.0 to 4.6.0 raised IS Sharpe threshold 0.3 to 0.5 with cumulative L2 suppression",
+      "description": "User queried 4.6 to 4.7 change is QT-R2-002: fill_rate denominator from equity_curve to data_bars. Zero direct effect on Sharpe/PF/trades L1 metrics. But 4.5.0 to 4.6.0 raised WFA_MIN_VALID_IS_SHARPE 0.3 to 0.5, hardening Gate #12 (WFA efficiency) so that L1-PASS strategies now fail L2 WFA more often. Also 4.6.0 raised _run_l2_param_sensitivity min sample 3 to 5, meaning 1-param strategies get param_sensitivity=None and Gate #11 auto-FAIL.",
+      "evidence": [
+        "Commit a542448 (4.7.0): only changes result_parser.py:fill_rate, no L1 Sharpe/PF/trades impact",
+        "Commit 3cb23d3 (4.6.0): WFA_MIN_VALID_IS_SHARPE 0.3 to 0.5 means L1 IS Sharpe 0.30-0.49 strategies get efficiency=None and L2 Gate #12 auto-FAIL",
+        "Commit 3cb23d3 (4.6.0): _run_l2_param_sensitivity min sample 3 to 5, single-param strategies get sensitivity=None and Gate #11 auto-FAIL",
+        "spec_change_log.md notes 4.6.0: IS Sharpe 0.3-0.49 strategies become WFA efficiency=None and Gate #12 FAIL (predicted)",
+        "Of 6/24 4.x L1-PASSes, even fewer reach Gate PASS (only ATLAS-2026-0418-004 reportedly)"
+      ],
+      "suggested_fix": "4.5.0 to 4.6.0 threshold change side-effect of killing IS Sharpe 0.30-0.49 strategies at L2 was likely missed in change:spec impact analysis. Short-term: raise L1_MIN_SHARPE to 0.5 (align with WFA_MIN_VALID_IS_SHARPE) so L1 stops wasting L2 cost on doomed strategies. Mid-term: revisit unevaluated=FAIL policy of Gate #11/#12."
+    },
+    {
+      "id": "QA-007",
+      "severity": "info",
+      "area": "threshold",
+      "title": "User L1 PF>=1.2 threshold claim is incorrect - actual L1 PF threshold is 0.8 (Gate PF is 1.2)",
+      "description": "User prompt states L1 thresholds: Sharpe>=0.3, PF>=1.2 but conflates Gate threshold (PF>=1.2) with L1 threshold (PF>=0.8). Actual: L1 PF<0.8 fails, L1 Sharpe<0.3 fails. Recent failure cluster has PF=0.92-1.04 which all clear L1 PF (0.8). Pure cause of all L1 failures is Sharpe<0.3 side.",
+      "evidence": [
+        "vectorbt_engine.py:53 L1_MIN_PROFIT_FACTOR: float = 0.8",
+        "Gen0418-001 PF=1.0337 (PF cleared) Sharpe=0.182 (<0.3) FAIL",
+        "Gen0418-002 PF=0.9235 (PF cleared) Sharpe=-0.5479 (<0.3) FAIL",
+        "Gen0418-003 PF=0.9615 (PF cleared) Sharpe=-0.1317 (<0.3) FAIL",
+        "All error strings say Sharpe Ratio shortage - zero PF shortage cases"
+      ],
+      "suggested_fix": "Clarify L1 vs Gate threshold separation. Root cause is Sharpe-side; PF-side tuning would not help. Sharpe calc definition + threshold consistency is the highest-priority discussion item."
+    }
+  ],
+  "l1_threshold_validity": "too_strict",
+  "l1_threshold_validity_detail": "L1_MIN_SHARPE=0.3 itself is reasonable as a pre-filter for Gate 0.8, but the Sharpe calc definition has shifted ~0.6-1.2 points downward through schema 1.x to 4.x, making it relatively much stricter. Gen041 era (1.x) champion at Sharpe=0.76 would likely re-evaluate to ~0.45-0.65 in 4.x. Lowering L1_MIN_SHARPE to 0.15-0.20, reverting Sharpe to position_returns definition, or unifying vectorbt year_freq to 252-day basis would restore historical consistency.",
+  "metrics_schema_drift_detected": true,
+  "schema_drift_summary": {
+    "from": "1.1.0 (Gen041 era)",
+    "to": "4.7.0 (current)",
+    "changes_affecting_sharpe": [
+      "1.1.0: position_returns to all returns (Sharpe /2.8 deflation)",
+      "vectorbt L1 vs ATLAS L2 year_freq 365 vs 252 day -> L1 Sharpe 1.185x inflation (L1/L2 inter-layer drift)",
+      "4.6.0: WFA_MIN_VALID_IS_SHARPE 0.3 to 0.5 (L2 Gate #12 tightening)",
+      "4.6.0: param_sensitivity min sample 3 to 5 (1-param strategies fail Gate #11)",
+      "4.7.0: fill_rate denominator fix (no L1 Sharpe impact)"
+    ],
+    "empirical_impact": "Schema 1.x: avg L1 Sharpe=0.924, PASS 97.4%; Schema 4.x: avg L1 Sharpe=-0.237, PASS 25.0%"
+  },
+  "failure_pattern_analysis": "20+ consecutive FAIL is BOTH a (relative) threshold strictness issue AND a strategy quality issue. Threshold side: (a) Sharpe calc deflated ~0.6-1.2 points 1.x to 4.x (b) L1_MIN_SHARPE=0.3 unchanged, so effective tightening. Strategy quality side: Gen0417-003/004/010/012/013/019 do show L1 PASSes - 6/24 = 25% pass rate is not catastrophic. The 20+ consecutive FAIL perception likely reflects a localized 24-hour trial-cluster bias. Systematic generation issues observed: (a) M15 strategies pass less often (Gen0417-018 GBP_USD M15: 526trades/sharpe=-0.58) (b) failing strategist outputs PF~1.0 borderline, WR 33-38% micro-edge strategies in bulk.",
+  "gen023_vs_failures_analysis": "Gen023 (ATLAS-2026-0418-004, EUR_USD M15 BB Squeeze Breakout) has NOT been BT at investigation time - only strategy.py exists, no backtest/ directory. User reported Sharpe=0.447 / PF=1.235 / WR=53% / trades=66 is either an estimate or from another source. Assuming accurate, Gen023 edge comes from: (1) strict session filter (UTC 8-17 only), (2) multi-stage filters (squeeze + ATR expansion + ADX + EMA50) drastically reducing trade frequency, (3) R:R 2.33 with WR 53% delivering PF=1.23, (4) low trade count = small std denominator in all-bar Sharpe, structurally inflating Sharpe. Gen022 (ATLAS-2026-0418-002, USD_JPY M15, 510trades, sharpe=-0.55) suffers opposite: WR=33% loss trades pump std, even PF<1.0 yields strongly negative Sharpe. Conclusion: current L1 Sharpe threshold 0.3 is structurally unfair to high-trade strategies. Comparing low-trade (Gen023-style) and high-trade (Gen022-style) on same Sharpe threshold is mathematically inequitable - add normalized sharpe_per_trade = sharpe/sqrt(trades) as supplementary signal in weakness_detector.",
+  "recommendations_priority_order": [
+    "P1: Move L1 thresholds into defaults.py with change:spec management (QA-003)",
+    "P1: Align vectorbt year_freq with BARS_PER_YEAR (QA-002, [fix:bug])",
+    "P2: Re-calibrate L1_MIN_SHARPE 0.3 to 0.15-0.20 to match 4.x distribution (QA-001)",
+    "P2: Add low-trade-count Sharpe-bias warning to weakness_detector (QA-004)",
+    "P3: Review impact of 4.6.0 WFA_MIN_VALID_IS_SHARPE / param_sensitivity min-sample changes (QA-006)",
+    "P3: Expand L1 perturbations to [0.85, 0.93, 1.0, 1.07, 1.15] 5-point grid (QA-005)"
+  ]
+}

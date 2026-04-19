@@ -1,0 +1,116 @@
+{
+  "agent": "qa-tester",
+  "findings": [
+    {
+      "id": "QT-001",
+      "severity": "critical",
+      "area": "param_sensitivity",
+      "title": "Gen023 param sensitivity: 15パラメータ × 3 BT = 45 BT がタイムアウトの直接原因",
+      "description": "ATLAS-2026-0418-004 (EUR_USD M15 volatility breakout) は config.json に 21 パラメータを持ち、_SENSITIVITY_SKIP_PARAMS 除外後に 15 パラメータが L1 感度分析の対象となる。perturbations=[0.9, 1.0, 1.1] の 3 点 × 15 = 45 回の _generate_signals_vectorized + _run_vectorbt_portfolio が直列実行される。M15 IS データは約 66,000 バー規模（3 年 IS 期間）であり、1 BT あたり数秒かかると推定すると合計 2〜5 分以上。また bool 型パラメータ enable_session_filter=True が isinstance(v, (int, float)) で True と評価され、不必要に感度分析に含まれている。Gen021/022 が 28〜34 秒で完了しているのは感度分析対象パラメータ数が少なかったためと考えられる。",
+      "evidence": [
+        "config.json: 21 params total, analyzed params after skip: ['bb_std_dev', 'atr_sma_window', 'ema_trend_period', 'squeeze_lookback', 'squeeze_quantile', 'atr_expansion_ratio', 'min_atr', 'min_adx', 'breakout_buffer', 'max_hold_bars', 'cooldown_bars', 'position_size_ratio', 'session_start_utc', 'session_end_utc', 'enable_session_filter'] = 15 params",
+        "vectorbt_engine.py L684: perturbations = [0.9, 1.0, 1.1] (3 points per param)",
+        "enable_session_filter=True → isinstance(True, (int, float)) = True, True != 0 = True → 分析対象に含まれる",
+        "MAX_PARAM_COMBINATIONS=200 のチェックは all_scores への append 後に行われるため、15 params は全て通過する（最初は all_scores=[]）",
+        "実測: Gen021 33.88s 完了 (EUR_JPY M15, シンプルパラメータ), Gen023 は 15 分以上ハング"
+      ],
+      "suggested_fix": "1) _SENSITIVITY_SKIP_PARAMS に bool 型を除外するガードを追加: `not isinstance(v, bool)` を条件に追加。2) MAX_PARAM_COMBINATIONS チェックをパラメータループの外側（for param_name の先頭）に移動して、パラメータ数が多い場合に早期終了させる。3) 上限を params 数ベースに変更（例: max 10 params まで）。"
+    },
+    {
+      "id": "QT-002",
+      "severity": "high",
+      "area": "unit_test",
+      "title": "test_wfa_efficiency_low_is_sharpe.py が WFA_MIN_VALID_IS_SHARPE=0.3 のハードコードでFAIL",
+      "description": "コミット 3cb23d3 (2026-04-17) で WFA_MIN_VALID_IS_SHARPE が 0.3 から 0.5 に引き上げられたが、tests/unit/test_wfa_efficiency_low_is_sharpe.py の test_below_valid_threshold が `assert WFA_MIN_VALID_IS_SHARPE == 0.3` をハードコードアサートしており FAIL している。コミットメッセージには「ゴールデンテスト 52/52 通過確認済み」とあるが、このユニットテストの更新が漏れている。[change:spec] 変更時の必須手順（テスト更新）が不完全だった。",
+      "evidence": [
+        "tests/unit/test_wfa_efficiency_low_is_sharpe.py L37: assert WFA_MIN_VALID_IS_SHARPE == 0.3",
+        "atlas/config/defaults.py: WFA_MIN_VALID_IS_SHARPE: Final[float] = 0.5",
+        "pytest 実行結果: FAILED tests/unit/test_wfa_efficiency_low_is_sharpe.py::TestLowISShaprpeUnevaluated::test_below_valid_threshold",
+        "コミット 3cb23d3: QT-R2-001: WFA_MIN_VALID_IS_SHARPE 0.3→0.5 引き上げ"
+      ],
+      "suggested_fix": "tests/unit/test_wfa_efficiency_low_is_sharpe.py L37 を `assert WFA_MIN_VALID_IS_SHARPE == 0.5` に更新。また L36 のコメントも `IS = 0.1 < 0.5 (WFA_MIN_VALID_IS_SHARPE)` に修正。test_normal_is_oos の IS=0.5 のテストケースは新閾値では境界値になるため、IS=0.6 等に変更することも検討。"
+    },
+    {
+      "id": "QT-003",
+      "severity": "high",
+      "area": "unit_test",
+      "title": "test_simple_feature_store_mtf.py::test_mtf_register_h1_ema が align_to_primary 仕様変更でFAIL",
+      "description": "コミット c885612 (2026-04-15, FTS-DATA-011) で align_to_primary が allow_exact_matches=False（close_time < primary_ts の厳密不等号）に変更されたが、test_mtf_register_h1_ema は変更前の仕様（M15 02:00 バーに H1 01:00 バーの値が使える）をテストしており FAIL している。新仕様では H1 01:00 バーの close_time=02:00 が M15 02:00 バーの primary_ts=02:00 と等しいため、allow_exact_matches=False により除外される。テストは旧仕様のまま残留している。",
+      "evidence": [
+        "tests/backtest/test_simple_feature_store_mtf.py L76-82: M15 02:00 で H1 index=1 の EMA が使えることをアサート",
+        "pytest 結果: AssertionError: np.float64(0.0025027472274246065) < 1e-10 (値がずれている)",
+        "コミット c885612: pd.merge_asof(allow_exact_matches=False) に変更 - aux_close_time < primary_ts に厳格化",
+        "test_mtf_data_loader.py の golden 期待値は c885612 で更新済みだが、test_simple_feature_store_mtf.py は未更新"
+      ],
+      "suggested_fix": "test_mtf_register_h1_ema を新仕様に合わせて修正。M15 02:00 バーでは H1 01:00（close_time=02:00）は除外されるため、M15 02:15 バー以降（H1 01:00 確定後の次 M15 バー）で検証するよう変更する。"
+    },
+    {
+      "id": "QT-004",
+      "severity": "medium",
+      "area": "param_sensitivity",
+      "title": "L1 感度分析のタイムアウトガードが存在しない",
+      "description": "_analyze_param_sensitivity 関数にタイムアウト設定が一切ない。MAX_PARAM_COMBINATIONS=200 の上限チェックは存在するが、これは all_scores（パラメータ単位のスコア数）のチェックであり、実際のBT回数制限ではない。15 params の場合 all_scores が 0 から始まるため、200 を超えることなく全 45 BT が実行される。また L2 の _run_l2_param_sensitivity にも asyncio タイムアウトなし。",
+      "evidence": [
+        "vectorbt_engine.py L718: `if len(all_scores) > MAX_PARAM_COMBINATIONS: break` — all_scores は各パラメータのCV完了後に append されるため、15 params の場合は all_scores が 0→1→2→...→14 と増えるだけで 200 を超えない",
+        "event_simulator.py の _run_l2_param_sensitivity にも timeout なし",
+        "run_layer1() は async 関数だが、内部の感度分析は同期処理のため asyncio.wait_for 等での保護が不可能"
+      ],
+      "suggested_fix": "1) _analyze_param_sensitivity に MAX_ANALYZED_PARAMS 定数（例: 8）を追加し、numeric_params を上位 N 件に制限する。2) またはパラメータのループ冒頭に `if len(details) >= MAX_ANALYZED_PARAMS: break` を追加。3) run_layer1 に壁時計タイムアウト（例: 120秒）を設け、タイムアウト時は sensitivity=None で通過させる。"
+    },
+    {
+      "id": "QT-005",
+      "severity": "medium",
+      "area": "bt_determinism",
+      "title": "L1 BT は決定論的だが L2 WFA は seed 依存で walk ごとに変動する設計",
+      "description": "L1 の _generate_signals_vectorized は純粋関数的でランダム要素がなく、同一 strategy.py・config・データに対して決定論的。L2 の _simulate も seed=42 固定で同一入力に対して再現性あり。ただし WFA は seed=42+len(walks) および seed=142+len(walks) を使用しており、ウォーク順序に依存するが決定論的。BT 決定性に関する懸念は低い。ハングの原因は非決定性ではなく計算量超過（QT-001）。",
+      "evidence": [
+        "vectorbt_engine.py: _generate_signals_vectorized に random 要素なし",
+        "event_simulator.py L1035: seed=42 + len(walks) — ウォーク数に依存するが固定",
+        "Monte Carlo は seed 固定（seed=42 デフォルト）",
+        "Gen021/022 の BT が 28-34 秒で一貫して完了 → 再現性あり"
+      ],
+      "suggested_fix": "対応不要。ただし BT 結果の再現性を保証するドキュメントが未整備のため、README または CLAUDE.md に seed ポリシーを記載することを推奨。"
+    },
+    {
+      "id": "QT-006",
+      "severity": "medium",
+      "area": "recent_commit_impact",
+      "title": "WFA_MIN_VALID_IS_SHARPE 0.3→0.5 引き上げが 20+ 世代連続 FAIL に寄与している可能性",
+      "description": "コミット 3cb23d3 (2026-04-17) で WFA_MIN_VALID_IS_SHARPE が 0.5 に引き上げられた。この変更により IS Sharpe が 0.3〜0.5 の中間域にある戦略は efficiency_ratio と strategy_drift が None（未評価）となる。Gate 条件 #12 WFA efficiency >= 0.7 は None の場合に FAIL するため、IS Sharpe が 0.3〜0.5 の戦略は追加で Gate を通りにくくなった。直近 20+ 世代の L1 Sharpe < 0.3 でのFAILは本変更の影響外だが、L1 PASS 後 Gate FAIL するケースには影響している可能性がある。",
+      "evidence": [
+        "コミット 3cb23d3: WFA_MIN_VALID_IS_SHARPE 0.3→0.5（QT-R2-001）",
+        "CLAUDE.md Gate #12: WFA効率 >= 0.7 — None の場合 FAIL",
+        "test_wfa_efficiency_low_is_sharpe.py L48: TestValidISSharpe の IS=0.5 のテストが現在の閾値と境界値一致"
+      ],
+      "suggested_fix": "閾値変更の意図（統計信頼性向上）は正当だが、IS Sharpe=0.5 のケースが efficiency=None となるため境界値 IS=0.6 以上での検証テストを追加すること。"
+    },
+    {
+      "id": "QT-007",
+      "severity": "low",
+      "area": "param_sensitivity",
+      "title": "L2 感度分析の最小サンプル 3→5 変更によりシングルパラメータ戦略で score=None になる",
+      "description": "コミット 3cb23d3 (QT-R2-002) で L2 param sensitivity の最小 PF サンプル数が 3 から 5 に変更された。_L2_SENSITIVITY_PARAMS に該当するパラメータが 1 件しかない戦略では、base(1) + 変動(2) = 3 PF しか収集できず、len(pfs) < 5 で None が返る。Gate #11 (param_sensitivity <= 0.5) は L2 score が None の場合は L1 score を使用するフォールバックがある（test_gate.py で確認済み）ため、即 FAIL にはならないが、L2 感度評価が常に未評価になる戦略クラスが存在する可能性がある。",
+      "evidence": [
+        "event_simulator.py L1227: `if len(pfs) < 5: return None`",
+        "_L2_SENSITIVITY_PARAMS: ('sl_atr_mult', 'tp_atr_mult', 'atr_period', 'rsi_period', 'ema_period', 'stop_loss_pips', 'take_profit_pips', 'lookback')",
+        "candidate_keys = [k for k in _L2_SENSITIVITY_PARAMS if k in params][:3] — 上位3件に制限",
+        "パラメータ 1 件のみの場合: 1 + 1*2 = 3 PF < 5 → always None"
+      ],
+      "suggested_fix": "最小サンプル数を candidate_keys 数に連動させる動的閾値に変更。例: `min_required = 1 + len(candidate_keys) * 2` とし、静的な 5 ではなくパラメータ数に応じて算出する。"
+    }
+  ],
+  "golden_test_result": {
+    "passed": 52,
+    "failed": 0,
+    "failures": []
+  },
+  "unit_test_result": {
+    "passed": "BT関連 (test_vectorbt_engine + test_runner + test_event_simulator): 34/34",
+    "failed": "test_wfa_efficiency_low_is_sharpe::test_below_valid_threshold: 1件 FAIL",
+    "mtf_test": "test_simple_feature_store_mtf::test_mtf_register_h1_ema: 1件 FAIL",
+    "note": "golden/ は全 52 件 PASS。ユニットテスト 2 件が仕様変更追従漏れで FAIL。"
+  },
+  "bt_determinism_concern": "懸念低。L1 (_generate_signals_vectorized + _run_vectorbt_portfolio) はランダム要素なしで完全決定論的。L2 (_simulate) は seed=42 固定。WFA は seed=42+walk_index で決定論的。Gen021/022 が一貫して 28〜34 秒で完了している事実が再現性を裏付ける。Gen023 のハングは非決定性ではなく、15 パラメータ × 45 BT の計算量超過が原因。",
+  "param_sensitivity_code_analysis": "L1 感度分析 (_analyze_param_sensitivity): numeric_params から _SENSITIVITY_SKIP_PARAMS を除外した全パラメータを対象に perturbations=[0.9, 1.0, 1.1] の 3 点を直列実行。タイムアウトなし。MAX_PARAM_COMBINATIONS=200 のガードは実質機能しない（all_scores カウントが params 数より遥かに少ない）。Gen023 (ATLAS-2026-0418-004) は 15 析対象パラメータ × 3 BT = 45 BT + bool型 enable_session_filter の誤包含が判明。L2 感度分析 (_run_l2_param_sensitivity): _L2_SENSITIVITY_PARAMS 上位 3 件 × 2 変動 + base = 最大 7 _simulate 呼び出し。full_data (IS+OOS) に対する実行で重いが、WFA を含まないため L1 より短時間で完了する設計。コミット 3cb23d3 (2026-04-17) で最小サンプル 3→5 に変更済み。",
+  "recent_commit_impact": "直近 2 週間 (2026-04-04〜2026-04-18) に atlas/backtest/ への変更が 30 件以上あり、全て [change:spec]/[fix:bug]/[refactor] 種別で管理されている。BT 判定に影響する主要変更: (1) c885612: align_to_primary allow_exact_matches=False 変更 → MTF 戦略の H1 補助特徴量が 1 バー遅延増加、シグナル生成タイミングにズレが生じる可能性。(2) 3cb23d3: WFA_MIN_VALID_IS_SHARPE 0.3→0.5 引き上げ → IS Sharpe 0.3〜0.5 の戦略が efficiency=None になりやすくなった。(3) a542448: fill_rate 分母修正 (data_bars) → fill_rate メトリクスの値が変化。(4) 7f66067: WFA MIN_WALKS 6→10 → ウォーク数不足で efficiency=None になるケースが増加。(5) 61cc707: B&H超過リターン market_exposure_ratio 正規化 → Gate #13 の判定が変化。これらの複合的な Gate 厳格化が 20+ 世代連続 FAIL の背景にある可能性が高い。vectorbt_engine.py 自体 (L1 BT ロジック) は 2 週間内に直接変更なし。"
+}
