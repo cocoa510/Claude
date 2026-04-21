@@ -36,11 +36,14 @@ class MyStrategy(Strategy):
     def generate_signal(self, bar: pd.Series, features: dict[str, float]) -> TradeSignal | None:
         """1本のbarと計算済み特徴量からシグナルを生成。純粋関数的、副作用なし"""
 
-    def on_fill(self, fill_event: dict) -> None:
-        """約定通知を受けて内部状態を更新"""
-
     def get_required_features(self) -> list[str]:
         """必要な特徴量名リスト"""
+
+    # on_fill は Phase 1b Step 7 (2026-04-21) 以降 optional。
+    # 約定状態は PositionManager（atlas/common/components/position_manager.py）が
+    # 一元管理する設計（Redesign_v2_Plan.md §6.4 Option C 垂直分離）。
+    # 戦略側で独自の状態（連勝数・クールダウン等）を保持したい場合のみ override する:
+    # def on_fill(self, fill_event) -> None: ...
 ```
 
 ### TradeSignal 必須フィールド
