@@ -1,52 +1,18 @@
 {
-  "generated_at": "2026-04-22T09:59:10Z",
+  "generated_at": "2026-04-25T00:30:00Z",
+  "generated_at_local": "2026-04-25T09:30:00+09:00",
   "hostname": "training-goto",
   "branch": "master",
-  "head_sha": "3235589148eff214eb7aea2215a14520740f9b36",
-  "uncommitted_files": [
-    "logs/handoff_note.md",
-    "logs/handoff_state.json"
-  ],
-  "untracked_files": [
-    ".claude/commands/handoff.md",
-    ".claude/scheduled_tasks.lock"
-  ],
-  "latest_commits": [
-    {"sha": "3235589", "subject": "[docs] fx-strategist: on_fill を optional として記述（Phase 1b Step 7 反映）"},
-    {"sha": "b3387ff", "subject": "[docs] atlas-generate: G-4 diversity_constraint 参照追加"},
-    {"sha": "30969bd", "subject": "[chore] 監査ラウンド1の調査ログとアラート保存"},
-    {"sha": "a47cbff", "subject": "[docs] /audit-loop AUDIT-2026-0418-001 最終レポート"},
-    {"sha": "e86ccf7", "subject": "[docs] AUDIT-P0-001: アラートログ数値は実データ集計のみルール追加"}
-  ],
-  "loop_session_active": false,
-  "current_topic": "ensemble_deployment_review",
-  "pending_user_decision": "option_a_b_or_c",
-  "phase_sequence_agreed": [
-    "2a_gate_tiering",
-    "3_component_extraction",
-    "3.6_strategy_tags_backfill",
-    "2b_gate_tiering_remainder",
-    "3.5_platform_deploy",
-    "3.7_diversity_controls",
-    "4_portfolio_layer",
-    "5_fts_live_integration"
-  ],
-  "next_actions": [
-    "ユーザーが Option A (BLOCK解消先行) / Option B (Phase即着手) / Option C (strategy_tags 最優先) を選択",
-    "選択後、合意済 Phase 順序に沿って着手",
-    "must_fix 4 件 (operational定義 / Gen41 OANDA net PF / FTS目的限定 / 高頻度Gate通過率シム) を優先対処"
-  ],
-  "must_fix_items": [
-    {"id": "BLOCK-1", "desc": "システム完成の operational 定義を文書化合意", "owner": "devil-advocate"},
-    {"id": "BLOCK-2", "desc": "Gen41 OANDA 実コスト計測で net PF>1.05 を事前検証", "owner": "fx-strategist + quant-analyst"},
-    {"id": "BLOCK-3", "desc": "FTS live 投入目的を spread/slippage キャリブレーション限定に明示", "owner": "devil-advocate"},
-    {"id": "BLOCK-4", "desc": "高頻度 Gate (trades/year>=80, MaxDD<=8%) の 83 戦略通過率シム", "owner": "fx-strategist + quant-analyst"}
-  ],
-  "champions_in_scope": ["ATLAS-2026-0408-041", "ATLAS-2026-0408-065"],
-  "constraints": {
-    "gate_14_secondary_pf_minimum": 1.0,
-    "cluster_cap_per_group": 3,
-    "g3_guardrail_weeks": 2,
-    "initial_pairs": ["USD_JPY", "EUR_USD", "GBP_USD"]
-  }
+  "head_sha_at_redirect": "69df9e9",
+  "redirect_only": true,
+  "canonical_handoff_locations": {
+    "ATLAS": "ATLAS/logs/handoff_note.md",
+    "fx_trading_system": "fx_trading_system/logs/handoff_note.md"
+  },
+  "note": "親リポ (claude/) の handoff は redirect のみ。サブプロジェクトの作業状態は各サブリポの handoff_note.md / handoff_state.json を参照すること。/handoff pull 実行時は CWD に応じて適切な note を読む運用。",
+  "parent_repo_only_pending_actions": [],
+  "warnings": [
+    "ATLAS は bc20d49 で独立 git 管理に分離済み（remote: https://github.com/cocoa510/ATLAS.git）",
+    "親リポ側 note を最新状態と誤読しないこと。ATLAS 側 note の generated_at と必ず比較し、新しい方を信用する"
+  ]
 }
