@@ -1,84 +1,146 @@
 # ATLAS 戦略比較分析
 
-複数の戦略を横断的に比較し、最適な戦略の選定を支援してください。
+複数戦略を横断比較してターミナルに出力します。
 
 ## 引数
-`$ARGUMENTS` — 以下の形式で指定:
-- `<id1> <id2> [id3...]` — 指定した世代同士を比較
-- `--top <N>` — スコア上位N件を比較（デフォルト: 5）
-- 引数なし — スコア上位5件を自動比較
+`$ARGUMENTS`:
+- `<id1> <id2> [id3...]` — 指定戦略を横断比較 (差分テーブル)
+- `--top <N>` — Top N 戦略を比較 (デフォルト 5)
+- 引数なし — Top 5 を自動比較
 
 ## 実行手順
 
-### 1. 比較データ取得（Python CLI）
-
-指定ID同士の場合:
+### 指定 ID 比較
 ```bash
-cd ATLAS && .venv/Scripts/python.exe -m atlas.main history get <id1>
-cd ATLAS && .venv/Scripts/python.exe -m atlas.main history get <id2>
+cd ATLAS && .venv/Scripts/python.exe -c "
+import json, sys
+from pathlib import Path
+
+ids = [a for a in '$ARGUMENTS'.split() if not a.startswith('--')]
+if not ids:
+    print('使用法: /atlas-compare <id1> <id2> [...]'); sys.exit(1)
+
+def load(sid):
+    rj = Path('strategies') / sid / 'backtest' / 'result.json'
+    if not rj.exists(): return None
+    return json.loads(rj.read_text(encoding='utf-8'))
+
+results = {sid: load(sid) for sid in ids}
+missing = [sid for sid, r in results.items() if r is None]
+if missing:
+    print(f'(BT 結果なし: {missing})')
+    results = {sid: r for sid, r in results.items() if r is not None}
+    if not results:
+        sys.exit(1)
+
+def get_metric(r, path):
+    for p in path.split('.'):
+        if r is None: return None
+        r = r.get(p) if isinstance(r, dict) else None
+    return r
+
+metrics = [
+    ('Instrument', 'instrument', None),
+    ('Direction', 'metadata.direction_bias', None),
+    ('--- L1 ---', None, None),
+    ('PF (L1)', 'layer1.profit_factor', 'max'),
+    ('Sharpe (L1)', 'layer1.sharpe_ratio', 'max'),
+    ('Trades (L1)', 'layer1.total_trades', 'max'),
+    ('WR (L1)', 'layer1.win_rate', 'max'),
+    ('MaxDD% (L1)', 'layer1.max_drawdown_pct', 'min_abs'),
+    ('--- L2 ---', None, None),
+    ('PF (L2)', 'layer2.profit_factor', 'max'),
+    ('Sharpe (L2)', 'layer2.sharpe_ratio', 'max'),
+    ('Trades (L2)', 'layer2.total_trades', 'max'),
+    ('--- Gate ---', None, None),
+    ('Tier1 PASS', 'gate_check.passed_count', 'max'),
+    ('Soft Score', 'gate_check.soft_score', 'max'),
+    ('Overall PASS', 'overall_passed', None),
+]
+
+# header
+header = f'{\"指標\":<20} | ' + ' | '.join(f'{sid[-12:]:>12}' for sid in results.keys())
+print('=== 戦略横断比較 ===')
+print(header)
+print('-' * len(header))
+
+for label, path, best_op in metrics:
+    if path is None:
+        print(label)
+        continue
+    values = {}
+    for sid, r in results.items():
+        v = get_metric(r, path)
+        values[sid] = v
+
+    # best 判定
+    best_sid = None
+    if best_op and any(v is not None for v in values.values()):
+        valid = {sid: v for sid, v in values.items() if v is not None and isinstance(v, (int, float))}
+        if valid:
+            if best_op == 'max':
+                best_sid = max(valid, key=valid.get)
+            elif best_op == 'min_abs':
+                best_sid = min(valid, key=lambda k: abs(valid[k]))
+
+    cells = []
+    for sid, v in values.items():
+        if v is None:
+            disp = 'N/A'
+        elif isinstance(v, bool):
+            disp = '✓' if v else '✗'
+        elif isinstance(v, float):
+            disp = f'{v:.3f}'
+        else:
+            disp = str(v)[:12]
+        marker = ' ★' if sid == best_sid else ''
+        cells.append(f'{disp:>10}{marker:<2}')
+
+    print(f'{label:<20} | ' + ' | '.join(cells))
+
+print()
+print('★ = 各指標の最良値')
+"
 ```
 
-上位N件の場合:
+### `--top <N>` 比較 (Top N 自動)
 ```bash
-cd ATLAS && .venv/Scripts/python.exe -m atlas.main history top --limit <N>
+cd ATLAS && .venv/Scripts/python.exe -m atlas.main history top --limit ${N:-5} 2>/dev/null | .venv/Scripts/python.exe -c "
+import sys, json
+data = json.load(sys.stdin)
+ids = [s.get('strategy_id') for s in data]
+print(f'対象戦略: {ids}')
+print(f'指定 ID 比較を実行: /atlas-compare ' + ' '.join(ids))
+"
+# 上記出力の「実行コマンド」を続けて Bash で実行
 ```
 
-各世代のメトリクスも取得:
-```bash
-cd ATLAS && .venv/Scripts/python.exe -m atlas.main metrics <generation_id>
+## 出力例
+
 ```
-
-### 2. 比較分析
-
-取得したデータを基に以下を分析:
-
-#### 基本比較テーブル
-主要15指標を横断比較し、各指標の最良値に ★ マークを付与:
-- コア指標: PF, Sharpe, Sortino, MaxDD, Win Rate, Total Trades
-- 効率指標: Recovery, Calmar, Edge Ratio, Trade Efficiency
-- 堅牢性: WFA Efficiency, Strategy Drift, Param Sensitivity, Consistency, SQN
-
-#### トレンド分析（同一系統の場合）
-- 世代間のスコア推移（改善/安定/劣化）
-- 振動検出（スコアが上下交互に振れていないか）
-
-#### 2世代差分（改良前後の場合）
-- 改善された指標リスト（差分 + 変化率）
-- 劣化した指標リスト
-- 純改善数（改善数 - 劣化数）
-
-### 3. 出力フォーマット
-```
-=== 戦略比較 ===
-
-指標              | <id1>         | <id2>         | <id3>
-final_score       | 0.76 ★        | 0.58          | 0.49
-PF                | 1.52 ★        | 1.41          | 1.35
-MaxDD             | 13.5% ★       | 17.2%         | 19.8%
-Sharpe            | 1.28 ★        | 1.05          | 0.92
-Sortino           | 2.34 ★        | 1.87          | 1.42
-Win Rate          | 58.3%         | 62.1% ★       | 51.2%
-Trades            | 342           | 456 ★         | 289
-WFA Eff           | 0.85 ★        | 0.72          | 0.68
-Drift             | 0.20 ★        | 0.35          | 0.42
+=== 戦略横断比較 ===
+指標                 |  -2026-0408-041 |  -2026-0426-014
+-----------------------------------------------------------------
+Instrument           |        USD_JPY  |        USD_JPY
+Direction            |     long_only ★ |     long_only ★
+--- L1 ---
+PF (L1)              |          1.239  |        1.567 ★
+Sharpe (L1)          |          0.764 ★|          0.645
+Trades (L1)          |          107 ★  |             31
+WR (L1)              |          0.486  |        0.581 ★
+MaxDD% (L1)          |          -1.99 ★|          -0.68 (※-0.68 が小)
+--- L2 ---
+PF (L2)              |          1.218  |        1.364 ★
+Sharpe (L2)          |          0.625 ★|          0.570
+Trades (L2)          |          112 ★  |             43
+--- Gate ---
+Tier1 PASS           |             5 ★ |              4
+Soft Score           |          0.671 ★|          0.468
+Overall PASS         |              ✗  |              ✗
 
 ★ = 各指標の最良値
-
---- トレンド ---
-推移: 改善傾向
-最良世代: <id1> (score: 0.76)
-
---- 推奨 ---
-次のステップ:
-  最良が優良(>=0.75) → /atlas-export <id1>
-  改善の余地あり → /atlas-improve <id1>
 ```
 
-## エラーハンドリング
-- 比較対象が1件のみ → 単体サマリーを表示し、他候補の検索を提案
-- バックテスト未完了の世代が含まれる → 除外して比較し警告表示
-- History Store にデータがない → `/atlas-backtest` の実行を促す
-
 ## 注意事項
-- 異なる通貨ペア・時間足の戦略比較ではその旨を明記
-- 世代間比較は同一 strategy_id の系統で最も意味がある
+- 異なる instrument/timeframe の比較は数値の絶対比較に意味がない場合あり
+- 詳細な指標 (26 metrics) は `evaluation/report.json` を直接参照
