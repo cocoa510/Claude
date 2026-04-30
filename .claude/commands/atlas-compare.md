@@ -25,7 +25,16 @@ def load(sid):
     if not rj.exists(): return None
     return json.loads(rj.read_text(encoding='utf-8'))
 
+def load_display_name(sid):
+    mp = Path('strategies') / sid / 'metadata.json'
+    if not mp.exists(): return ''
+    try:
+        return json.loads(mp.read_text(encoding='utf-8')).get('display_name') or ''
+    except Exception:
+        return ''
+
 results = {sid: load(sid) for sid in ids}
+display_names = {sid: load_display_name(sid) for sid in ids}
 missing = [sid for sid, r in results.items() if r is None]
 if missing:
     print(f'(BT 結果なし: {missing})')
@@ -61,6 +70,12 @@ metrics = [
 # header
 header = f'{\"指標\":<20} | ' + ' | '.join(f'{sid[-12:]:>12}' for sid in results.keys())
 print('=== 戦略横断比較 ===')
+# display_name 列を冒頭に表示（1 行 / 戦略）
+print('対象戦略:')
+for sid in results.keys():
+    dn = display_names.get(sid) or '(display_name 未設定)'
+    print(f'  {sid}  ->  {dn}')
+print()
 print(header)
 print('-' * len(header))
 

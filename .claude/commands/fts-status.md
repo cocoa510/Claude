@@ -55,11 +55,22 @@ if last_event:
 
 # 4) 各戦略の state サマリー
 state_dir = Path('logs/unified_state')
+
+def _fts_display_name(sid: str) -> str:
+    '''FTS imported 戦略の metadata.json から display_name を取得。'''
+    mp = Path('trading_platform/strategies/imported') / sid / 'metadata.json'
+    if not mp.exists():
+        return ''
+    try:
+        return json.loads(mp.read_text(encoding='utf-8')).get('display_name') or ''
+    except Exception:
+        return ''
+
 if state_dir.exists():
     print()
     print('--- 戦略別 state サマリー ---')
-    print(f'{\"strategy_id\":<25} | {\"bars\":>6} | {\"signals\":>7} | {\"orders\":>6} | {\"fills\":>5} | {\"PnL JPY\":>10} | {\"open\":>6} | {\"updated\":<25}')
-    print('-' * 110)
+    print(f'{\"strategy_id\":<25} | {\"display_name\":<35} | {\"bars\":>6} | {\"signals\":>7} | {\"fills\":>5} | {\"PnL JPY\":>10} | {\"open\":>6}')
+    print('-' * 130)
     total_pnl = 0.0
     open_count = 0
     for sf in sorted(state_dir.glob('*.state.json')):
@@ -68,9 +79,9 @@ if state_dir.exists():
         except Exception:
             continue
         sid = s.get('strategy_id', sf.stem)
+        dn = _fts_display_name(sid)
         bars = s.get('bars_processed', 0)
         sigs = (s.get('signals_long', 0) or 0) + (s.get('signals_flat', 0) or 0) + (s.get('signals_short', 0) or 0)
-        orders = s.get('orders_submitted', 0)
         fills = s.get('orders_filled', 0)
         pnl = s.get('total_realized_pnl_jpy') or 0.0
         total_pnl += pnl
@@ -78,8 +89,7 @@ if state_dir.exists():
         open_mark = '★' if open_id else ''
         if open_id:
             open_count += 1
-        updated = (s.get('updated_at') or '')[:25]
-        print(f'{sid:<25} | {bars:>6} | {sigs:>7} | {orders:>6} | {fills:>5} | {pnl:>10.2f} | {open_mark:>6} | {updated:<25}')
+        print(f'{sid:<25} | {dn:<35} | {bars:>6} | {sigs:>7} | {fills:>5} | {pnl:>10.2f} | {open_mark:>6}')
 
     print()
     print(f'合計 realized PnL: {total_pnl:.2f} JPY')
@@ -95,13 +105,24 @@ from pathlib import Path
 
 sid = '$ARGUMENTS'.split()[0]
 
+# display_name lookup
+dn = ''
+mp = Path('trading_platform/strategies/imported') / sid / 'metadata.json'
+if mp.exists():
+    try:
+        dn = json.loads(mp.read_text(encoding='utf-8')).get('display_name') or ''
+    except Exception:
+        pass
+header = f'{sid} ({dn})' if dn else sid
+
 # state.json
 sf = Path('logs/unified_state') / f'{sid}.state.json'
 if not sf.exists():
+    print(f'=== {header} ===')
     print(f'(state ファイル未作成: {sf}、Runner 未起動 or 戦略未動作)')
 else:
     s = json.loads(sf.read_text(encoding='utf-8'))
-    print(f'=== {sid} 詳細 state ===')
+    print(f'=== {header} 詳細 state ===')
     for k, v in s.items():
         print(f'  {k}: {v}')
 

@@ -168,23 +168,32 @@ cd /c/data/制作物/claude/fx_trading_system && python -c "
 import json
 from pathlib import Path
 
+def _fts_display_name(sid: str) -> str:
+    mp = Path('trading_platform/strategies/imported') / sid / 'metadata.json'
+    if not mp.exists(): return ''
+    try:
+        return json.loads(mp.read_text(encoding='utf-8')).get('display_name') or ''
+    except Exception:
+        return ''
+
 states = []
 for sf in Path('logs/unified_state').glob('*.state.json'):
     try:
         s = json.loads(sf.read_text(encoding='utf-8'))
-        states.append((s.get('strategy_id', sf.stem), s.get('total_realized_pnl_jpy', 0) or 0, s.get('closes_completed', 0) or 0))
+        sid = s.get('strategy_id', sf.stem)
+        states.append((sid, _fts_display_name(sid), s.get('total_realized_pnl_jpy', 0) or 0, s.get('closes_completed', 0) or 0))
     except Exception:
         pass
 
-states.sort(key=lambda x: x[1], reverse=True)
-print(f'{\"strategy_id\":<25} | {\"PnL JPY\":>12} | {\"closes\":>6}')
-print('-' * 55)
+states.sort(key=lambda x: x[2], reverse=True)
+print(f'{\"strategy_id\":<25} | {\"display_name\":<35} | {\"PnL JPY\":>12} | {\"closes\":>6}')
+print('-' * 90)
 total = 0
-for sid, pnl, cl in states:
+for sid, dn, pnl, cl in states:
     total += pnl
-    print(f'{sid:<25} | {pnl:>12.2f} | {cl:>6}')
-print('-' * 55)
-print(f'{\"TOTAL\":<25} | {total:>12.2f} |')
+    print(f'{sid:<25} | {dn:<35} | {pnl:>12.2f} | {cl:>6}')
+print('-' * 90)
+print(f'{\"TOTAL\":<25} | {\"\":<35} | {total:>12.2f} |')
 "
 ```
 

@@ -54,16 +54,21 @@ while cur and cur not in visited:
 ancestors.reverse()  # 古い順
 
 # 3) 表示
-print(f'=== {target} 系譜 ===')
+target_meta = load_meta(target) or {}
+target_dn = target_meta.get('display_name') or ''
+target_label = f'{target} ({target_dn})' if target_dn else target
+print(f'=== {target_label} 系譜 ===')
 print()
-print(f'{\"世代ID\":<25} | {\"PF\":>6} | {\"Sharpe\":>7} | {\"trades\":>6} | {\"Tier1\":>6} | {\"soft\":>6} | {\"判定\":<15}')
-print('-' * 95)
+print(f'{\"世代ID\":<22} | {\"表示名\":<35} | {\"PF\":>6} | {\"Sharpe\":>7} | {\"trades\":>6} | {\"Tier1\":>6} | {\"soft\":>6} | {\"判定\":<15}')
+print('-' * 130)
 
 prev_score = None
 for sid in ancestors:
     r = load_result(sid)
+    m = load_meta(sid) or {}
+    dn = m.get('display_name') or ''
     if not r:
-        print(f'{sid:<25} | (BT 未実行)')
+        print(f'{sid:<22} | {dn:<35} | (BT 未実行)')
         continue
     l1 = r.get('layer1', {}) or {}
     g = r.get('gate_check', {}) or {}
@@ -81,7 +86,7 @@ for sid in ancestors:
         delta = (soft - prev_score) / max(prev_score, 0.01) * 100
         irate = f' ({delta:+.1f}%)'
 
-    print(f'{sid:<25} | {pf:>6.3f} | {sharpe:>7.3f} | {trades:>6} | {tier1_passed:>6} | {soft:>6.3f} | {judg:<15}{irate}')
+    print(f'{sid:<22} | {dn:<35} | {pf:>6.3f} | {sharpe:>7.3f} | {trades:>6} | {tier1_passed:>6} | {soft:>6.3f} | {judg:<15}{irate}')
     if soft > 0:
         prev_score = soft
 
@@ -94,16 +99,31 @@ print(f'計 {len(ancestors)} 世代')
 ```bash
 cd ATLAS && .venv/Scripts/python.exe -m atlas.main history top --limit ${N:-5} 2>/dev/null | .venv/Scripts/python.exe -c "
 import sys, json
+from pathlib import Path
+
+def _dn(sid: str) -> str:
+    if not sid: return ''
+    mp = Path('strategies') / sid / 'metadata.json'
+    if not mp.exists(): return ''
+    try:
+        return json.loads(mp.read_text(encoding='utf-8')).get('display_name') or ''
+    except Exception:
+        return ''
+
 data = json.load(sys.stdin)
 print('=== ATLAS Top 戦略系譜サマリ ===')
 print()
 for s in data:
     sid = s.get('strategy_id', '')
+    dn = _dn(sid)
+    label = f'{sid} ({dn})' if dn else sid
     parent = s.get('parent_id') or '(初代)'
+    parent_dn = _dn(parent) if parent != '(初代)' else ''
+    parent_label = f'{parent} ({parent_dn})' if parent_dn else parent
     gen = s.get('generation', 0)
     score = s.get('final_score') or 0
-    print(f'{sid} (世代 {gen}, score {score:.3f})')
-    print(f'  parent: {parent}')
+    print(f'{label} (世代 {gen}, score {score:.3f})')
+    print(f'  parent: {parent_label}')
     print(f'  status: {s.get(\"status\")}')
     print()
 "

@@ -19,6 +19,21 @@ cd ATLAS && .venv/Scripts/python.exe -c "
 import json, glob
 from pathlib import Path
 
+def _display_name(sid: str) -> str:
+    '''metadata.json から display_name を取得（無ければ空文字）。'''
+    mp = Path('strategies') / sid / 'metadata.json'
+    if not mp.exists():
+        return ''
+    try:
+        return json.loads(mp.read_text(encoding='utf-8')).get('display_name') or ''
+    except Exception:
+        return ''
+
+def _label(sid: str) -> str:
+    '''表示用ラベル: ATLAS-... (display_name) を返す。'''
+    dn = _display_name(sid)
+    return f'{sid} ({dn})' if dn else sid
+
 strategy_dirs = sorted(glob.glob('strategies/ATLAS-*'))
 total = len(strategy_dirs)
 passed = 0
@@ -56,7 +71,7 @@ if gate_pass_strategies:
     print('--- Full Gate PASS 戦略 ---')
     for sid, r in gate_pass_strategies[:10]:
         l1 = r.get('layer1', {}) or {}
-        print(f'  {sid}: PF={l1.get(\"profit_factor\"):.3f} Sharpe={l1.get(\"sharpe_ratio\"):.3f} trades={l1.get(\"total_trades\")}')
+        print(f'  {_label(sid)}: PF={l1.get(\"profit_factor\"):.3f} Sharpe={l1.get(\"sharpe_ratio\"):.3f} trades={l1.get(\"total_trades\")}')
 else:
     print('--- Full Gate PASS 戦略: 0 件 ---')
 
@@ -68,7 +83,7 @@ if edge_candidates:
         pf = l1.get('profit_factor')
         sharpe = l1.get('sharpe_ratio')
         trades = l1.get('total_trades')
-        print(f'  {sid}: Tier1 {pc}/{tc} soft={soft:.3f} PF={pf:.2f} Sharpe={sharpe:.2f} trades={trades}')
+        print(f'  {_label(sid)}: Tier1 {pc}/{tc} soft={soft:.3f} PF={pf:.2f} Sharpe={sharpe:.2f} trades={trades}')
 "
 ```
 
@@ -111,7 +126,17 @@ l1 = r.get('layer1', {}) or {}
 l2 = r.get('layer2', {}) or {}
 g = r.get('gate_check', {}) or {}
 
-print(f'=== {sid} ===')
+# display_name 取得（人間表示用エイリアス、metadata.json::display_name 参照）
+mp = d / 'metadata.json'
+display_name = ''
+if mp.exists():
+    try:
+        display_name = json.loads(mp.read_text(encoding='utf-8')).get('display_name') or ''
+    except Exception:
+        pass
+header = f'{sid} ({display_name})' if display_name else sid
+
+print(f'=== {header} ===')
 print(f'instrument: {r.get(\"instrument\")} / {r.get(\"timeframe\")}')
 print(f'overall_passed: {r.get(\"overall_passed\")}')
 print()
@@ -142,12 +167,22 @@ if fc:
 ```bash
 cd ATLAS && .venv/Scripts/python.exe -m atlas.main history top --limit ${N:-10} 2>/dev/null | .venv/Scripts/python.exe -c "
 import sys, json
+from pathlib import Path
 data = json.load(sys.stdin)
 print('=== ATLAS Top スコア戦略 ===')
-print(f'{\"順位\":>3} | {\"戦略ID\":<22} | {\"世代\":>4} | {\"スコア\":>6} | {\"状態\":<12} | {\"通貨\":<8}')
-print('-' * 78)
+print(f'{\"順位\":>3} | {\"戦略ID\":<22} | {\"表示名\":<35} | {\"世代\":>4} | {\"スコア\":>6} | {\"状態\":<12}')
+print('-' * 110)
 for i, s in enumerate(data, 1):
-    print(f'{i:>3} | {s.get(\"strategy_id\",\"\"):<22} | {s.get(\"generation\",0):>4} | {s.get(\"final_score\",0):>6.3f} | {s.get(\"status\",\"\"):<12} | {s.get(\"instrument\",\"\"):<8}')
+    sid = s.get('strategy_id', '')
+    # display_name lookup from metadata.json
+    dn = ''
+    mp = Path('strategies') / sid / 'metadata.json'
+    if mp.exists():
+        try:
+            dn = json.loads(mp.read_text(encoding='utf-8')).get('display_name') or ''
+        except Exception:
+            pass
+    print(f'{i:>3} | {sid:<22} | {dn:<35} | {s.get(\"generation\",0):>4} | {s.get(\"final_score\",0):>6.3f} | {s.get(\"status\",\"\"):<12}')
 "
 ```
 
