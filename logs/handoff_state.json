@@ -1,35 +1,39 @@
 {
-  "generated_at": "2026-05-04T00:15:00Z",
+  "generated_at": "2026-05-04T01:30:00Z",
   "hostname": "training-goto",
   "branch": "master",
-  "head_sha_atlas": "2d23758b68f36d10a126a783d3792cd7b013b690",
-  "head_sha_fts": "31dd5e9",
+  "head_sha_atlas": "7a4fb581d57a507572a13ebd8261cd5a14748731",
+  "head_sha_fts": "5476ccebe8b2f89bd78b14805a9f79157409964a",
   "uncommitted_files": [],
-  "latest_commits": [
-    {"sha": "2d23758", "subject": "[atlas] ATLAS-2026-0504-066 - GATE PASS (Sharpe=4.08, USD/JPY H4 Donchian3)", "date": "2026-05-04"},
-    {"sha": "67da445", "subject": "[atlas] ATLAS-2026-0504-065 - GATE PASS (Sharpe=2.18, EUR/JPY H1 Donchian5)", "date": "2026-05-04"},
-    {"sha": "3d9cbf7", "subject": "[atlas] ATLAS-2026-0504-064 - GATE PASS (Sharpe=3.96, USD/JPY H4 Donchian5)", "date": "2026-05-04"},
-    {"sha": "d6a1f90", "subject": "[atlas] ATLAS-2026-0504-063 - GATE PASS (Sharpe=2.05, EUR/JPY H1 Donchian15)", "date": "2026-05-04"},
-    {"sha": "434a0cb", "subject": "[atlas] ATLAS-2026-0504-062 - GATE PASS (Sharpe=3.61, USD/JPY H4 Donchian8)", "date": "2026-05-04"}
-  ],
+  "session_summary": {
+    "phase_a_strategy_discovery": {
+      "gate_pass_new": 8,
+      "ids": ["ATLAS-2026-0504-058","ATLAS-2026-0504-060","ATLAS-2026-0504-061","ATLAS-2026-0504-062","ATLAS-2026-0504-063","ATLAS-2026-0504-064","ATLAS-2026-0504-065","ATLAS-2026-0504-066"],
+      "max_l2_sharpe": 4.080,
+      "max_bh_excess_pct": 2347
+    },
+    "phase_b_expert_review": {
+      "experts": ["quant-analyst","fx-strategist","devil-advocate","risk-execution-engineer","platform-architect"],
+      "key_findings": [
+        "devil-advocate WFA バグ指摘は事実誤認（Tier2 計算は正常）",
+        "FTS imported 36件中 21件 (58%) が現行 Tier2 基準未達",
+        "うち 19件は 2026-04-26 Cluster top-2 selection のユーザー意図的 paper 投入"
+      ]
+    },
+    "phase_c_phase0_cleanup": {
+      "rescue_069_removed": true,
+      "archived_strategies": ["ATLAS-2026-0408-012","ATLAS-2026-0408-013","ATLAS-2026-0418-004","ATLAS-2026-0421-001","ATLAS-2026-0421-002"],
+      "archive_path": "fx_trading_system/trading_platform/strategies/archived_2026-05-04/",
+      "fts_imported_remaining": 31
+    }
+  },
   "loop_session_active": false,
-  "gate_pass_this_session": [
-    "ATLAS-2026-0504-058 (EUR/JPY H1 D10, soft=0.749, Sharpe=2.295)",
-    "ATLAS-2026-0504-060 (EUR/JPY H1 D20, soft=0.802, Sharpe=2.087)",
-    "ATLAS-2026-0504-061 (USD/JPY H4 D10, soft=0.864, Sharpe=3.334)",
-    "ATLAS-2026-0504-062 (USD/JPY H4 D8, soft=0.863, Sharpe=3.611)",
-    "ATLAS-2026-0504-063 (EUR/JPY H1 D15, soft=0.744, Sharpe=2.045)",
-    "ATLAS-2026-0504-064 (USD/JPY H4 D5, soft=0.878, Sharpe=3.960)",
-    "ATLAS-2026-0504-065 (EUR/JPY H1 D5, soft=0.705, Sharpe=2.180)",
-    "ATLAS-2026-0504-066 (USD/JPY H4 D3, soft=0.879, Sharpe=4.080)"
-  ],
-  "key_discovery": "EMAなし純粋Donchian + SL2x/TP4x がJPYペアで有効。USD/JPY H4はD短いほど高Sharpe。EUR/JPY H1はD長いほど高品質。",
-  "bugs_fixed": ["pips_per_unit: 非JPYペアはconfig.parametersにpips_per_unit: 10000を明示必須"],
-  "unresolved": ["SHORT/BALANCEDポートフォリオ不足（全13件long_only）", "vectorbt L1 SHORT制限"],
   "next_actions": [
-    "EUR/JPY H4データ取得: atlas data fetch EUR_JPY --timeframe H4 --years 7",
-    "SHORT戦略代替手段: [change:spec]でvectorbt SHORT対応を検討",
-    "rescue_candidates救済: ATLAS/logs/rescue_candidates.jsonの4件",
-    "EUR/JPY H1 Donchian25, 30で更なる最適化"
+    "Phase 1-S4: EUR/JPY H4 データ取得 (atlas data fetch EUR_JPY --timeframe H4 --years 7)",
+    "Phase 1-S1: vectorbt L1 SHORT 評価バグ修正 [change:spec]",
+    "Phase 1-S2: pips_per_unit 通貨ペア自動推論",
+    "Phase 2-R1: Per-Symbol/Per-Direction Net Exposure Cap (Live移行前 P0)",
+    "Phase 2-R2: Signal Coalescing (同方向クラスタ束ね注文)",
+    "Phase 3-E1: 2022/10-12 円高反転局面 isolated 検証"
   ]
 }
