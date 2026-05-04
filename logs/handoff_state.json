@@ -1,11 +1,27 @@
 {
-  "generated_at": "2026-05-04T04:30:00Z",
+  "generated_at": "2026-05-04T05:30:00Z",
   "hostname": "training-goto",
   "branch": "master",
   "head_sha_atlas": "03978058f12a05f97b0d50de5c9cd671bd8515c2",
-  "head_sha_fts": "ba034b6af917682bc74a44eda3cfbfd03da71ce3",
+  "head_sha_fts": "725d1b1aa1cee1b716578021b0aa5bdb221bbf2a",
+  "head_sha_root": "33cc18067dc3d5cfda6029f31a0156f233cfbac7",
   "uncommitted_files": [],
   "metrics_schema_version": "5.4.0",
+  "fts_runner": {
+    "status": "running",
+    "pid": 12080,
+    "started_at": "2026-05-04T04:58:48Z",
+    "discovery_total": 34,
+    "live_count": 2,
+    "paper_count": 32,
+    "live_strategies": ["ATLAS-2026-0408-065", "ATLAS-2026-0417-003"]
+  },
+  "oanda_account": {
+    "balance": 307833.34,
+    "open_positions": 0,
+    "session_pnl": 98.0,
+    "currency": "JPY"
+  },
   "session_summary": {
     "phase_a_strategy_discovery": {
       "gate_pass_new": 8,
@@ -17,8 +33,7 @@
       "experts": ["quant-analyst","fx-strategist","devil-advocate","risk-execution-engineer","platform-architect"],
       "key_findings": [
         "devil-advocate WFA バグ指摘は事実誤認 (Tier2 計算は正常)",
-        "FTS imported 36件中 21件 (58%) が現行 Tier2 基準未達",
-        "うち 19件は 2026-04-26 Cluster top-2 selection のユーザー意図的 paper 投入"
+        "FTS imported 36件中 21件 (58%) が現行 Tier2 基準未達"
       ]
     },
     "phase_c_phase0_cleanup": {
@@ -30,22 +45,30 @@
       "data_fetched": ["EUR_JPY_H4.parquet (10887 bars)", "EUR_JPY_H4_secondary.parquet (6230 bars)"],
       "strategies_generated": 6,
       "gate_pass_new": 3,
-      "ids": ["ATLAS-2026-0504-070","ATLAS-2026-0504-071","ATLAS-2026-0504-072"],
-      "discovery": "EUR/JPY H4 は USD/JPY H4 と逆で D10 が最良"
+      "ids": ["ATLAS-2026-0504-070","ATLAS-2026-0504-071","ATLAS-2026-0504-072"]
     },
     "phase_e_vectorbt_short_fix": {
       "schema_bump": "5.3.2 -> 5.4.0",
       "files_modified": ["atlas/backtest/vectorbt_engine.py", "atlas/config/defaults.py", "tests/unit/test_vectorbt_engine.py", "docs/spec_change_log.md"],
       "parity_verified": ["ATLAS-2026-0504-058","ATLAS-2026-0504-066","ATLAS-2026-0504-070"],
-      "short_demo": ["ATLAS-2026-0504-047 修正前後で正しく評価変化", "ATLAS-2026-0504-073 新規 SHORT 試作"],
-      "tests_passed": "8件 unit + 1件 golden + ruff clean",
+      "tests_passed": "8 unit + 1 golden + ruff clean",
       "commit": "0397805"
+    },
+    "phase_f_runner_restart": {
+      "oanda_close_trades": ["155 (+49 JPY)", "159 (+49 JPY)"],
+      "oanda_close_pnl_total": 98.0,
+      "fts_config_copy_fix": "058-066 の config.json/metadata.json/strategy.py コピー漏れ修正 (commit c70c09b)",
+      "discovery_before": 24,
+      "discovery_after": 34,
+      "fts_runner_pid": 12080
     }
   },
-  "fts_paper_count": 34,
-  "atlas_gate_pass_total": 16,
+  "atlas_gate_pass_total": 19,
+  "fts_paper_count": 32,
+  "fts_live_count": 2,
   "loop_session_active": false,
   "next_actions": [
+    "24-48時間後に /fts-status で Forward Test 状況確認 (新規13戦略の bars/signals/fills 蓄積)",
     "SHORT 戦略探索 (USD/JPY MR SHORT, GBP/JPY データ取得, EUR/USD H4 SHORT)",
     "rescue_candidates 救済 (0430-005 アンサンブル化)",
     "Per-Symbol/Direction Cap (SHORT 投入後)",
@@ -54,7 +77,7 @@
   ],
   "open_critical_issues": [
     "SHORT 戦略不足 (FTS 34件全て long_only)",
-    "Per-Symbol Cap 未実装 (SHORT 投入時に必要)",
+    "Per-Symbol Cap 未実装",
     "Promotion Gate 未形式化",
     "Heartbeat 監視 + Capacity Test 未実施"
   ]
