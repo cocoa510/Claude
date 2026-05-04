@@ -1,80 +1,65 @@
 # Handoff Note
 
-**最終更新**: 2026-05-05T12:30:00Z @ (current session)
+**最終更新**: 2026-05-05T22:40:00Z @ TRAINING-GOTO
 **ブランチ**: master
-**直前のコミット**: `91357df` [atlas] 177-178 Gate PASS
+**直前のコミット**: 7e61557 [atlas] 210-213 GBP/JPY D=10 TP精密探索
 
 ## 現在の作業（1 行サマリ）
 
-自律ループ継続中: TP拡張シリーズを徹底探索し **EUR/JPY H4 D=5 SL=1.5 TP=12.0 (175) が soft=0.899 で全セッション最高スコア** を達成。FTS 81 戦略稼働。
+GBP/JPY H4 SL=2.0 D値・TP値探索で全履歴最高値 soft=0.9468 (ATLAS-2026-0504-211: D=10 SL=2.0 TP=10) 確定。FTS 106戦略稼働中。
 
 ## 詳細コンテキスト
 
-前セッション引継ぎ: SL=1.5 TightSL を全D値で網羅。
-本セッション新フェーズ: TP拡張（4.0→5.0→6.0→8.0→10.0→12.0→15.0）を系統探索。
-EUR/JPY H4 D=5 SL=1.5 はあらゆるTPで一貫して PASS。TP=12 が最適解 (soft=0.899)。
+### 今セッション主要発見
+1. **SL=2.0 がGBP/JPYに革命的**: SL=1.5では完全failだったD=7〜12が、SL=2.0で全て Gate PASS
+2. **全時代最高値**: GBP/JPY D=10 SL=2.0 TP=10 → soft=0.9468 (ATLAS-2026-0504-211)
+3. **TP最適化完了**: D=10 SL=2.0 TP曲線: 6(0.866)→8(0.943)→9(0.931)→10(0.9468)→11(0.941)→12(0.919)
+4. **EUR/JPY SL=2.0は全D値でL1 FAIL**: GBP/JPY固有の特性
+5. **USD/JPY SL=2.0 最適**: D=3 TP=15 → soft=0.893
 
-## 本セッション最重要発見
+### 確定した最適値
+- **GBP/JPY H4 絶対最優秀**: D=10 SL=2.0 TP=10 (211) soft=0.9468 ← 全履歴最高
+- **EUR/JPY H4 最優秀**: D=5 SL=1.5 TP=12 (175) soft=0.899
+- **USD/JPY H4 最優秀**: D=3 SL=2.0 TP=15 (187) soft=0.893
 
-### EUR/JPY D=5 SL=1.5 TP最適化曲線
-| TP | soft | Sharpe | WFA | BH% | ID |
-|---|---|---|---|---|---|
-| 4.0 | 0.873 | 2.72 | 0.992 | +870 | 137 |
-| 6.0 | 0.878 | 2.76 | 0.935 | +1519 | 168 |
-| 8.0 | 0.880 | 2.54 | 0.976 | +1541 | 172 |
-| 10.0 | 0.876 | 2.42 | 0.997 | +1561 | 173 |
-| **12.0** | **0.899** | 2.50 | 1.007 | +1954 | **175** ← 全戦略最高 |
-| 15.0 | 0.818 | 2.31 | 0.975 | +1488 | 176 |
+### 全時代TOP 10 (soft_score)
+| Rank | ID | ペア | D | SL | TP | soft |
+|---|---|---|---|---|---|---|
+| 1 | 211 | GBP/JPY | 10 | 2.0 | 10 | **0.9468** |
+| 2 | 212 | GBP/JPY | 10 | 2.0 | 11 | 0.9414 |
+| 3 | 197 | GBP/JPY | 10 | 2.0 | 8 | 0.9433 |
+| 4 | 213 | GBP/JPY | 10 | 2.0 | 9 | 0.9305 |
+| 5 | 192 | GBP/JPY | 3 | 2.0 | 12 | 0.9269 |
+| 6 | 182 | GBP/JPY | 5 | 2.0 | 12 | 0.9252 |
+| 7 | 180 | GBP/JPY | 5 | 2.0 | 8 | 0.925 |
+| 8 | 199 | GBP/JPY | 12 | 2.0 | 8 | 0.9339 |
+| 9 | 196 | GBP/JPY | 7 | 2.0 | 12 | 0.9025 |
+| 10 | 175 | EUR/JPY | 5 | 1.5 | 12 | 0.899 |
 
-### USD/JPY D=3 SL=1.5 TP拡張 (BH爆発)
-| TP | soft | BH% | ID |
-|---|---|---|---|
-| 4.0 | 0.880 | +3916 | 133 |
-| 6.0 | 0.828 | +7152 | 167 |
-| 8.0 | 0.834 | +9703 | 170 |
-| 10.0 | 0.855 | +10014 | 171 |
-| 12.0 | FAIL (L1 Sharpe=0.22) | - | 174 |
-
-### SL=1.5 D値フェールゾーン (TP=4.0)
-- USD/JPY: D=7 のみ FAIL
-- GBP/JPY: D=7〜12 FAIL
-- EUR/JPY: 全D値 (3,5,7,10,15) PASS
-
-### TP拡張有効範囲サマリ
-- USD/JPY D=3: TP≤10 PASS
-- EUR/JPY D=5: TP≤15 PASS (TP=12 が最適)
-- EUR/JPY D=7: TP=12 PASS (soft=0.881)
-- GBP/JPY D=3: TP≤6 PASS
-- GBP/JPY D=5: TP≤5 PASS
-
-### pips_per_unit バグ修正 (重要)
-JPYペアは `pips_per_unit=100` が正解 (10000 は NG — SL が 100 倍タイトになる)
-
-## FTS 状態
-
-- **81件稼働** (最終再起動 2026-05-05)
-- 全 Paper モード (live_eligible=false)
-- 大部分が JPY クロス H4 LONG (高相関リスク)
-
-## 未コミット変更
-
-なし（全コミット・プッシュ済み）
+### FTS 状況
+- インポート済み戦略: 106件
+- 最新追加: ATLAS-2026-0504-213まで全Gate PASS戦略インポート済み
 
 ## 次にやること
 
-### 高優先 (未探索TP拡張)
-1. **EUR/JPY D=10 TP=12** (D=10 TP=5 soft=0.814。TP=12 で最適値を狙う)
-2. **GBP/JPY D=5 SL=2.0 TP=8** (SL=2.0 で TP 拡張の効果確認)
-3. **EUR/JPY D=12 TP=12** (D=12 TP=5 soft=0.829)
+1. **GBP/JPY H1 D=10 SL=2.0 TP=10 試行** — H4最高値。H1でも有効か確認
+2. **GBP/USD H4 D=10 SL=2.0 TP=10** — 非JPYペアへの転用
+3. **EUR/JPY D=5 SL=1.5 TP=12 に SL=1.0 変形** — さらなる win rate 向上
+4. **GBP/JPY D=10 SL=2.0 TP=10 に min_atr 調整** — 現在 min_atr=0.30
+5. **FTS runner 再起動確認** — 106戦略で正常動作確認
 
-### 多様化方向
-4. CAD/JPY H4 データ取得 → 探索
-5. SHORT戦略: 0424-001 唯一。現状維持
+## 関連文書・コマンド
+
+- 最新戦略ID: ATLAS-2026-0504-213
+- 次の採番: ATLAS-2026-0504-214
+- バックテスト: `cd /c/data/works/FX/ATLAS && .venv/Scripts/python.exe -m atlas.main backtest <ID>`
+- FTS インポート先: `C:\data\works\FX\fx_trading_system\trading_platform\strategies\imported\`
+- FTS 再起動: `cd /c/data/works/FX/fx_trading_system && PowerShell.exe -Command "& .\scripts\start_unified_runner.ps1"`
 
 ## 引継ぎ時の注意
 
-- **pips_per_unit**: JPY ペア = `100`、非JPYペア = `10000`
-- **EUR/JPY D=5 TP=12 (175)**: soft=0.899 が全履歴最高
-- **USD/JPY D=3 TP=10 (171)**: BH+10014% で複利最大
-- **FTS 81 戦略**: ウォームアップに 1〜2 時間かかる
-- **ATLAS コミット**: 親 FX repo とは別管理 (cd /c/data/works/FX/ATLAS && git push)
+- **pips_per_unit=100 は必須** (JPYペア。非JPYは10000)
+- **SL=2.0 は GBP/JPY 専用**: EUR/JPY は全D値でL1 FAIL
+- バックテスト前の validate は不要 (Stage 4 は long-only戦略で誤判定)
+- GBP/JPY D=10 SL=2.0 TP=10 が全時代最高。min_atr / cooldown 調整でさらなる改善余地あり
+- USD/JPY でも SL=2.0 TP=15 は有効 (soft=0.893)
