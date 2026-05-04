@@ -1,129 +1,112 @@
 # Handoff Note
 
-**最終更新**: 2026-05-04T05:30:00Z @ training-goto
+**最終更新**: 2026-05-04T08:00:00Z @ training-goto
 **ブランチ**: master (ATLAS / FTS とも master)
-**直前のコミット**:
-- ATLAS: `0397805` [change:spec] vectorbt L1 SHORT 評価バグ修正 (5.3.2 → 5.4.0)
-- FTS: `725d1b1` [chore] hourly log snapshot (実装変更は `c70c09b` config.json コピー漏れ修正)
 
 ## 現在の作業（1 行サマリ）
 
-11 件 Gate PASS + SCHEMA 5.4.0 bump + FTS Runner 再起動で **34 戦略 (Live 2 / Paper 32) Forward Test 稼働中**
+SHORT 戦略開発ループ: 12 戦略生成・全 Gate PASS 失敗、ただし既存 ATLAS-2026-0424-001 が vectorbt 5.4.0 で **Tier 1 ALL PASS** 判明（FTS Paper 投入候補）
 
 ## 詳細コンテキスト（5 行）
 
-本セッションは多段階の成果: ① 「EMA なし純粋 Donchian + SL2x/TP4x」パターンで JPY ペア 8 件 Gate PASS（最高 L2 Sharpe=4.08）。② 専門家 5 名並列レビューで devil-advocate WFA バグ指摘が事実誤認、FTS imported 36 件中 21 件が現行 Tier2 基準未達と判明。③ Phase 0 健全化（5 戦略 archive + rescue 069 削除）。④ EUR/JPY H4 横展開で 3 件追加 Gate PASS（070-072）。⑤ vectorbt L1 SHORT 評価バグ根本修正（[change:spec] 5.4.0）。⑥ **FTS Live ポジション 2 件決済（+98 JPY 利益確定）→ Runner 全停止 → 再起動で 34 件 Forward Test 投入**。⑦ 058-066 の config.json コピー漏れを修正してコミット。
+ユーザー指示「許可確認なしで戦略開発ループを回し続ける」を受け、SHORT/balanced 戦略を 12 件生成（ATLAS-2026-0504-073〜084）。USD/JPY/EUR/USD/GBP/JPY/GBP/USD/EUR/JPY を MR/Breakout/balanced で網羅的に試行。すべて overall_passed=false。同セッションで既存 SHORT/balanced 戦略を vectorbt 5.4.0 で 8 件再評価し、**ATLAS-2026-0424-001 (GBPUSD-MeanRev-Short-M15-001) が Tier 1 全 8 条件 PASS** することを発見（B&H 超過 +0.65%、Secondary PF=0.94、L2 PF=1.01、SHORT 696 trades）。Tier 2 soft_score=0.35 < 0.70 で overall=false だが、Tier 1 真の Immutable は満たす。本セッションで Gate PASS 達成戦略は 0 件、ただし重要な構造的洞察を多数獲得。
 
 ## 未コミット変更 / WIP コミット対象
 
-なし（ATLAS / FTS / 親リポジトリ全てコミット・プッシュ済み）
+なし（12 戦略生成 + 5 件 5.4.0 再評価結果すべてコミット済み）
 
-## 現在の Runner 状態 (重要)
+## SHORT 戦略開発の構造的結論
 
-- **Runner PID 12080 で稼働中** (2026-05-04T13:58:48 起動、JST)
-- discovery_complete: total=34 (Live 2 + Paper 32)
-- 全 34 戦略 warmup 完了、main loop 起動中
-
-### Live 戦略 (2 件、fixed_units=100, daily_loss_stop=-1000)
-
-| sid | display | 累積 PnL |
+| 失敗パターン | 件数 | 原因 |
 |---|---|---|
-| ATLAS-2026-0408-065 | USDJPY-MeanRev-Any-M15-016 | +103.10 JPY |
-| ATLAS-2026-0417-003 | EURJPY-TrendFollow-Long-M15-001 | -28.50 JPY |
+| L1 Sharpe FAIL | 7 | 073, 074, 076, 077, 080, 081, 082 |
+| L1 trade 数不足 (<20) | 3 | 078 (制約過剰), 079 (同), 083 (H4 noise) |
+| L1 PASS / L2 過学習 | 1 | 075 (IS PF=1.19 → OOS PF=0.88) |
+| L2 PASS だが Tier 1 #1/#4 | 1 | 084 (PF<1 + B&H excess<0) |
 
-### Paper 戦略 (32 件、本日 13 件は新規 Forward Test 投入)
+主要構造的要因:
+1. **2019-2026 JPY weakness era**: USD/JPY 140→156, GBP/JPY 130→200 → SHORT 構造的逆風
+2. **EUR/USD sideways 2023-26**: Donchian SHORT/Breakout SHORT は fade される
+3. **vectorbt 5.4.0 SHORT bug fix**: 既存 SHORT 戦略の評価値を下方修正（過去 false positive 解消）
+4. **Tier 2 soft_score 上限**: PF<1.5 / Sharpe<1.5 だと自動的に soft<0.4 で SHORT には厳しい
 
-新規 Forward Test 投入 (本日 Gate PASS):
-- 0504-058/060/063/065 (EUR/JPY H1, Donchian 10/20/15/5)
-- 0504-061/062/064/066 (USD/JPY H4, Donchian 10/8/5/3)
-- 0504-070/071/072 (EUR/JPY H4, Donchian 10/15/20)
-- 0504-012/035 は既存 (待機状態から再 warmup)
+## 唯一の Tier 1 ALL PASS SHORT 戦略
 
-既存 Forward Test 中 (19 件、bars=4〜340 で観察継続中)。OPEN ポジションあり: 0408-070, 0408-081, 0417-004, 0426-004, 0426-005
+**ATLAS-2026-0424-001 (GBPUSD-MeanRev-Short-M15-001)** — 重要発見
 
-## OANDA Live Account 情報
+| Tier 1 条件 | 値 | 閾値 | 判定 |
+|---|---|---|---|
+| Profit Factor | 1.0088 | >=1.0 | ✓ |
+| Max Drawdown % | 12.10 | <=30 | ✓ |
+| Total Trades | 696 | >=50 | ✓ |
+| **B&H Excess Return %** | **+0.65** | >=0 | ✓ |
+| Secondary Period PF | 0.9436 | >=0.8 | ✓ |
+| Direction Bias | LONG=0 SHORT=696 | short_only | ✓ |
+| RiskGuard Halt/yr | 0.0 | <=3.48 | ✓ |
+| KillSwitch Trigger | 0 | ==0 | ✓ |
 
-- balance: **307,833.34 JPY** (本日 +98 JPY 利益確定)
-- オープンポジション: 0 件
-- account_id: 001-009-21110227-002 (live 環境)
+**Tier 2: soft_score=0.3521 < 0.70 で overall=false** だが、Tier 1（真の Immutable）は完全充足。
 
-## セッション成果サマリ (Gate PASS 11 件追加)
+戦略仕様:
+- パラメータ: bb_std=1.5, rsi_overbought=70, atr_sl_multiplier=1.5, tp_rr_ratio=2.0
+- session: UTC 7-20 時 (London + NY)
+- エントリ: RSI(14)>70 AND close>BB_upper(20, 1.5)
+- エグジット: RSI<50 OR SL=1.5×ATR OR TP=SL×2.0
 
-| ID | display | TF | L2 Sharpe | soft | 備考 |
-|---|---|---|---|---|---|
-| 058 | EURJPY-Breakout-Long-H1-004 | H1 | 2.295 | 0.749 | EMA なし Donchian10 |
-| 060 | EURJPY-Breakout-Long-H1-005 | H1 | 2.087 | 0.802 | EMA なし Donchian20 |
-| 061 | USDJPY-Breakout-Long-H4-002 | H4 | 3.334 | 0.864 | EMA なし Donchian10 |
-| 062 | USDJPY-Breakout-Long-H4-003 | H4 | 3.611 | 0.863 | EMA なし Donchian8 |
-| 063 | EURJPY-Breakout-Long-H1-006 | H1 | 2.045 | 0.745 | EMA なし Donchian15 |
-| 064 | USDJPY-Breakout-Long-H4-004 | H4 | 3.960 | 0.878 | EMA なし Donchian5 |
-| 065 | EURJPY-Breakout-Long-H1-007 | H1 | 2.180 | 0.705 | EMA なし Donchian5 |
-| 066 | USDJPY-Breakout-Long-H4-005 | H4 | 4.080 | 0.879 | **本セッション最高 Sharpe** |
-| 070 | EURJPY-Breakout-Long-H4-004 | H4 | 2.452 | 0.880 | EUR/JPY H4 横展開 D10 |
-| 071 | EURJPY-Breakout-Long-H4-005 | H4 | 2.351 | 0.873 | EUR/JPY H4 横展開 D15 |
-| 072 | EURJPY-Breakout-Long-H4-006 | H4 | 2.126 | 0.860 | EUR/JPY H4 横展開 D20 |
+## 改良試行の結果
+
+0424-001 から 081/082 を fork して Tier 2 強化試行:
+- **081** (bb_std=2.0, rsi=73, ADX<25 厳格化): WR 62.7→34.6% に激減、L1 FAIL
+- **082** (RR=1.5, early RSI exit): WR 62.7→48.1%、Sharpe 0.39→0.19 に低下
+
+**結論**: 0424-001 のパラメータは既に sweet spot で、改良は逆効果。Tier 2 突破は構造的に困難。
 
 ## 次にやること
 
-### 短期（次セッション着手候補）
+### 即実施候補（次セッション）
 
-1. **24-48 時間後に `/fts-status` で Forward Test 状況確認** — 新規 13 戦略の bars / signals / fills 蓄積を観察
-2. **SHORT 戦略の探索** — vectorbt 5.4.0 で正しく評価できるが edge 発見が必要
-   - 候補1: USD/JPY mean_reversion SHORT（過買い RSI 戻り）
-   - 候補2: GBP/JPY データ取得 + 同パターン展開
-   - 候補3: EUR/USD H4 SHORT (H4 ノイズ少ない、2022 強下落)
-3. **rescue_candidates 救済** — 0430-005 (PF=3.08, trades=28) → アンサンブル設計
+1. **ATLAS-2026-0424-001 の FTS Paper 投入判断**:
+   - Tier 1 ALL PASS = 真の Immutable 条件は満たす
+   - Tier 2 0.35 = 旧 deploy (0410-008 soft=0.49, 0426-013 soft=0.13 等) と同水準
+   - 方向性集中リスク (FTS 34件全 long_only) を緩和する数少ない選択肢
+   - **判断はユーザーに委ねる**: overall=false なので autonomous 投入は避けた
+
+2. **追加の SHORT 探索 (代替アプローチ)**:
+   - GBP/JPY M15 MR SHORT（M15 + JPY pair で MR、未試行）
+   - EUR/USD H1 Donchian SHORT（077 は MR、Donchian は未試行）
+   - 多時間足 (MTF) trend filter 追加（H4 trend 下抜けで SHORT 限定）
+   - session-bound SHORT（NY セッション only など）
+
+3. **rescue_candidates 救済 (handoff_state next_actions)**:
+   - 0430-005 (PF=3.08, trades=28) アンサンブル化
 
 ### 中期
 
-4. **Per-Symbol/Direction Net Exposure Cap (P3)** — SHORT 戦略生成後に必要性確認
-5. **pips_per_unit 通貨ペア自動推論** — 非 JPY ペアの設定ミス防止
-6. **Promotion Gate 形式化** — Paper → Live 昇格基準を `promotion_gate.yaml` 化
-7. **Capacity Test** — 1→5→13→34→50 戦略のロードテスト
-
-### 長期
-
-8. **Kill Switch 3 階層化** + ロールバック Runbook
-9. **Heartbeat + Prometheus** — 34 件 Paper 戦略のヘルス監視
-
-## テストフロー (再確認)
-
-```
-① L1 (ATLAS BT)        — 過去IS期間で簡易スクリーニング
-↓ PASS
-② L2 (ATLAS BT)        — 過去IS+OOS全期間 + Secondary でGate判定
-↓ Gate PASS
-③ Paper Trading (FTS) = フォワードテスト  ← 本セッション現在地
-   - リアルタイム市場で仮想口座取引
-   - 推奨観察期間: 4 ヶ月以上
-↓ Promotion Gate 通過
-④ Live Trading (FTS)
-   - fixed_units=100 (最小ロット) から開始
-```
-
-「フォワードテスト」と「Paperトレード」は同一概念（別名）。
+4. WFA Efficiency / Strategy Drift が null になる原因調査（多くの戦略で null）
+5. Per-Symbol/Direction Net Exposure Cap (P3)
+6. Promotion Gate 形式化（Paper → Live 昇格基準）
 
 ## 関連文書・コマンド
 
-- 発見パターン: `memory/project_no_ema_donchian_discovery.md`
-- 専門家チーム評価結果: 本セッション会話履歴
-- spec_change_log エントリ: 2026-05-04 vectorbt L1 SHORT 評価バグ修正
-- baseline parity: `ATLAS/logs/parity_baseline_5_3_2.json`
-- archive 詳細: `fx_trading_system/trading_platform/strategies/archived_2026-05-04/README.md`
-- rescue 状態: `ATLAS/logs/rescue_candidates.json`
-- Runner ログ: `fx_trading_system/logs/unified_runner.stdout.log`
-- 実行中ループ: なし
+- **重要発見**: ATLAS-2026-0424-001 5.4.0 再評価結果 → `ATLAS/strategies/ATLAS-2026-0424-001/backtest/result.json`
+- セッション内全戦略コミット: 073-084 各戦略の `[atlas] ATLAS-2026-0504-XXX ...` コミット
+- spec_change_log: 2026-05-04 vectorbt L1 SHORT 評価バグ修正 (5.3.2→5.4.0)
+- 実行中ループ: なし（手動 1 戦略ずつ生成）
+
+## Runner 状態
+
+前セッションから継続: PID 12080 で稼働中、Live 2 + Paper 32 = 34 戦略 Forward Test 中。本セッションでは Runner に変更なし。
+
+## OANDA Live Account（変更なし）
+- balance: 307,833.34 JPY
+- Open positions: 0 件
 
 ## 引継ぎ時の注意
 
-- **Runner 起動中 (PID=12080)**: 次セッションでも継続稼働するはず。停止確認は `tail logs/unified_runner.jsonl` で最新タイムスタンプ確認
-- **Runner 停止が必要な場合**: `touch logs/unified_runner.stop` でグレースフル停止、または PowerShell `scripts/start_unified_runner.ps1` で再起動
-- **vectorbt L1 SHORT 修正済み (5.4.0)**: SHORT 戦略の L1 結果は信頼できる。それ以前の SHORT 戦略 (045-047) の結果は誤情報
-- **bit-exact parity 維持**: 既存 long_only の L1/L2 数値は完全一致を確認済み (058/066/070)
-- **EMA フィルターの効きどころ**: USD/JPY H1 のみ EMA 必要、それ以外の JPY pair H1/H4 は EMA なしが最適
-- **pips_per_unit バグ**: 非 JPY ペアは `config.parameters` 内に `"pips_per_unit": 10000` 必須
-- **archive の復活**: `git mv archived_2026-05-04/{sid} imported/{sid}` + Runner 再起動で復活
-- **devil-advocate 評価の限界**: 数値だけ見て履歴・user_override を読まない傾向。指摘は鵜呑みにせず必ず文脈確認
-- **FTS imported 配置**: 戦略追加時は ATLAS から `config.json + metadata.json + strategy.py` を必ずコピー（gate_results.json/runner_config.json だけだと discovery で skip）
-- **Runner discovery タイミング**: 起動時のみ実行 → imported 変更には Runner 再起動が必要 (動的 reload なし)
-- **Live と Paper は同一プロセス**: UnifiedRunner で 1 プロセス管理、Paper のみ再起動は不可能
+- **0424-001 投入は要ユーザー判断**: Tier 1 ALL PASS だが overall=false。autonomous 投入は CLAUDE.md「確認無し連続運用」の `Gate PASS した戦略は FTS ペーパートレードに即投入する` に厳密には該当しない（`Gate PASS = overall_passed=true`）
+- **既知バグ集**: 
+  - インジケータ名 `bb_upper` (誤) → `bollinger_upper` (正、builtin map 必須)
+  - `hasattr()` 禁止 → `bar.get("timestamp", None)` パターン
+  - `pips_per_unit=10000` (非 JPY) / `=100` (JPY) を `config.parameters` に必須
+- **fx-strategist の傾向**: AND 厳格化と OR 緩和の両方に振れる。明示的に「sweet spot を維持」と指示しないと逆方向に動くことあり
+- **vectorbt 5.4.0 SHORT 真値**: 過去 SHORT 戦略の Tier 1 値は信頼できる（pre-5.4.0 は false positive 含む）
