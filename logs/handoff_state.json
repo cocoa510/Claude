@@ -1,21 +1,22 @@
 {
-  "generated_at": "2026-05-04T01:30:00Z",
+  "generated_at": "2026-05-04T04:30:00Z",
   "hostname": "training-goto",
   "branch": "master",
-  "head_sha_atlas": "7a4fb581d57a507572a13ebd8261cd5a14748731",
-  "head_sha_fts": "5476ccebe8b2f89bd78b14805a9f79157409964a",
+  "head_sha_atlas": "03978058f12a05f97b0d50de5c9cd671bd8515c2",
+  "head_sha_fts": "ba034b6af917682bc74a44eda3cfbfd03da71ce3",
   "uncommitted_files": [],
+  "metrics_schema_version": "5.4.0",
   "session_summary": {
     "phase_a_strategy_discovery": {
       "gate_pass_new": 8,
       "ids": ["ATLAS-2026-0504-058","ATLAS-2026-0504-060","ATLAS-2026-0504-061","ATLAS-2026-0504-062","ATLAS-2026-0504-063","ATLAS-2026-0504-064","ATLAS-2026-0504-065","ATLAS-2026-0504-066"],
       "max_l2_sharpe": 4.080,
-      "max_bh_excess_pct": 2347
+      "pattern": "EMA なし純粋 Donchian + SL2x/TP4x"
     },
     "phase_b_expert_review": {
       "experts": ["quant-analyst","fx-strategist","devil-advocate","risk-execution-engineer","platform-architect"],
       "key_findings": [
-        "devil-advocate WFA バグ指摘は事実誤認（Tier2 計算は正常）",
+        "devil-advocate WFA バグ指摘は事実誤認 (Tier2 計算は正常)",
         "FTS imported 36件中 21件 (58%) が現行 Tier2 基準未達",
         "うち 19件は 2026-04-26 Cluster top-2 selection のユーザー意図的 paper 投入"
       ]
@@ -23,17 +24,38 @@
     "phase_c_phase0_cleanup": {
       "rescue_069_removed": true,
       "archived_strategies": ["ATLAS-2026-0408-012","ATLAS-2026-0408-013","ATLAS-2026-0418-004","ATLAS-2026-0421-001","ATLAS-2026-0421-002"],
-      "archive_path": "fx_trading_system/trading_platform/strategies/archived_2026-05-04/",
-      "fts_imported_remaining": 31
+      "archive_path": "fx_trading_system/trading_platform/strategies/archived_2026-05-04/"
+    },
+    "phase_d_eurjpy_h4": {
+      "data_fetched": ["EUR_JPY_H4.parquet (10887 bars)", "EUR_JPY_H4_secondary.parquet (6230 bars)"],
+      "strategies_generated": 6,
+      "gate_pass_new": 3,
+      "ids": ["ATLAS-2026-0504-070","ATLAS-2026-0504-071","ATLAS-2026-0504-072"],
+      "discovery": "EUR/JPY H4 は USD/JPY H4 と逆で D10 が最良"
+    },
+    "phase_e_vectorbt_short_fix": {
+      "schema_bump": "5.3.2 -> 5.4.0",
+      "files_modified": ["atlas/backtest/vectorbt_engine.py", "atlas/config/defaults.py", "tests/unit/test_vectorbt_engine.py", "docs/spec_change_log.md"],
+      "parity_verified": ["ATLAS-2026-0504-058","ATLAS-2026-0504-066","ATLAS-2026-0504-070"],
+      "short_demo": ["ATLAS-2026-0504-047 修正前後で正しく評価変化", "ATLAS-2026-0504-073 新規 SHORT 試作"],
+      "tests_passed": "8件 unit + 1件 golden + ruff clean",
+      "commit": "0397805"
     }
   },
+  "fts_paper_count": 34,
+  "atlas_gate_pass_total": 16,
   "loop_session_active": false,
   "next_actions": [
-    "Phase 1-S4: EUR/JPY H4 データ取得 (atlas data fetch EUR_JPY --timeframe H4 --years 7)",
-    "Phase 1-S1: vectorbt L1 SHORT 評価バグ修正 [change:spec]",
-    "Phase 1-S2: pips_per_unit 通貨ペア自動推論",
-    "Phase 2-R1: Per-Symbol/Per-Direction Net Exposure Cap (Live移行前 P0)",
-    "Phase 2-R2: Signal Coalescing (同方向クラスタ束ね注文)",
-    "Phase 3-E1: 2022/10-12 円高反転局面 isolated 検証"
+    "SHORT 戦略探索 (USD/JPY MR SHORT, GBP/JPY データ取得, EUR/USD H4 SHORT)",
+    "rescue_candidates 救済 (0430-005 アンサンブル化)",
+    "Per-Symbol/Direction Cap (SHORT 投入後)",
+    "pips_per_unit 通貨ペア自動推論",
+    "Promotion Gate 形式化 (Paper -> Live 昇格基準)"
+  ],
+  "open_critical_issues": [
+    "SHORT 戦略不足 (FTS 34件全て long_only)",
+    "Per-Symbol Cap 未実装 (SHORT 投入時に必要)",
+    "Promotion Gate 未形式化",
+    "Heartbeat 監視 + Capacity Test 未実施"
   ]
 }
