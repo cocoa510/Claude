@@ -1,71 +1,99 @@
 # Handoff Note
 
-**最終更新**: 2026-05-05T08:50:00Z @ (current session)
+**最終更新**: 2026-05-05T11:00:00Z @ (current session)
 **ブランチ**: master
-**直前のコミット**: `692f436` [atlas] ATLAS-2026-0504-126 Gate PASS D=4
+**直前のコミット**: `2775dc8` [atlas] 157-158 Gate PASS
 
 ## 現在の作業（1 行サマリ）
 
-自律ループ継続中: GBP/JPY H4 Donchian breakout 系列を徹底探索、D=4〜15 全て Gate PASS。本セッションで 10 件 Gate PASS 達成。FTS は 45 戦略稼働予定。
+自律ループ継続中: SL=1.5 TightSL + TP=5.0 拡張設計を3 JPY クロスペアで系統的に探索。本セッションで **24件 Gate PASS** を追加、FTS 64 戦略稼働中。
 
 ## 詳細コンテキスト
 
-前セッションの 0424-001 FTS 投入 + 今セッションでの自律ループ継続。
-「許可確認なしで戦略開発ループを回し続けて」指示を受け、SHORT 探索 → rescue_candidates → GBP/JPY H4 Donchian breakout 系列に収束。
-GBP/JPY H4 は 1件/10分ペースで Gate PASS を連続達成中。
+前セッション(handoff 引継ぎ): GBP/JPY H4 Donchian breakout 系列 D=4〜15 全 Gate PASS。
+本セッション: SL=1.5 (TightSL) バリアントを USD/JPY、GBP/JPY、EUR/JPY の H4 全 D 値で網羅的に探索。
+新たな発見: TP=5.0 延長 + max_hold=16 が短中期 D 値(D=3〜7)で有効、長期 D 値(D=10+)は L1 FAIL。
+pips_per_unit=100 (JPY ペア) が正しい値。10000 は NG（SL が100倍タイトになる）。
 
-## 本セッション Gate PASS 実績 (2026-05-04)
+## 本セッション Gate PASS 実績 (2026-05-04〜05)
 
-| 戦略ID | 概要 | soft | WFA |
-|--------|------|------|-----|
-| 0504-098 | USD/JPY M15 rescue breakout (PF=1.88/Sharpe=1.77) | 0.950 | 0.832 |
-| 0504-106 | GBP/JPY H4 D=5 Donchian (PF=1.32/Sharpe=2.53) | 0.869 | 1.002 |
-| 0504-110 | GBP/JPY H4 D=7 Donchian (PF=1.30/Sharpe=2.39) | 0.844 | 1.047 |
-| 0504-111 | GBP/JPY H4 D=10 Donchian (PF=1.34/Sharpe=2.45) | 0.845 | 1.041 |
-| 0504-117 | GBP/JPY H4 D=15 Donchian (PF=1.42/Sharpe=2.43) | 0.900 | 1.000 |
-| 0504-119 | GBP/JPY H4 D=20/TP=5 (PF=1.19/Sharpe=1.97) | 0.776 | 0.819 |
-| 0504-123 | GBP/JPY H4 D=12 Donchian (PF=1.29/Sharpe=2.31) | 0.831 | 1.016 |
-| 0504-124 | GBP/JPY H4 D=8 Donchian (PF=1.30/Sharpe=2.37) | 0.829 | 1.080 |
-| 0504-125 | GBP/JPY H4 D=6 Donchian (PF=1.30/Sharpe=2.41) | 0.857 | 1.026 |
-| 0504-126 | GBP/JPY H4 D=4 Donchian (PF=1.26/Sharpe=2.45) | 0.845 | 1.025 |
+### SL=1.5 TP=4.0 系列
+| ID | ペア | D | soft | WFA | Sharpe |
+|---|---|---|---|---|---|
+| 0504-133 | USD/JPY H4 | D=3 | 0.880 | 0.989 | 3.93 |
+| 0504-134 | GBP/JPY H4 | D=15 | 0.829 | 1.001 | 2.09 |
+| 0504-137 | EUR/JPY H4 | D=5 | 0.873 | 0.992 | 2.72 |
+| 0504-138 | EUR/JPY H4 | D=15 | 0.835 | 0.950 | 2.26 |
+| 0504-139 | USD/JPY H4 | D=10 | 0.865 | 1.012 | 3.24 |
+| 0504-140 | USD/JPY H4 | D=15 | 0.850 | 0.972 | 2.89 |
+| 0504-142 | EUR/JPY H4 | D=3 | 0.828 | 0.982 | 2.63 |
+| 0504-143 | EUR/JPY H4 | D=7 | 0.844 | 0.968 | 2.29 |
+| 0504-145 | USD/JPY H4 | D=12 | 0.845 | 1.003 | 3.08 |
+| 0504-150 | GBP/JPY H4 | D=3 | 0.786 | 0.978 | 2.32 |
+
+### SL=1.5 TP=5.0 系列 (max_hold=16)
+| ID | ペア | D | soft | WFA | Sharpe |
+|---|---|---|---|---|---|
+| 0504-149 | USD/JPY H4 | D=3 | 0.839 | 0.932 | 3.77 |
+| 0504-152 | EUR/JPY H4 | D=5 | 0.848 | 0.982 | 2.57 |
+| 0504-156 | GBP/JPY H4 | D=3 | 0.797 | 0.987 | 2.41 |
+| 0504-157 | GBP/JPY H4 | D=5 | 0.803 | 0.952 | 2.38 |
+| 0504-158 | EUR/JPY H4 | D=7 | 0.843 | 0.970 | 2.35 |
 
 ## 知見・発見
 
-- **GBP/JPY H4 Donchian sweet spot**: D=4〜15 全て Gate PASS (soft=0.776〜0.900)
-- **D=3**: L1 FAIL (GBP/JPYのH4では短すぎ)
-- **D=15 が最高** (soft=0.900, WFA=1.000)
-- **SHORT探索**: JPYクロスは構造的上昇バイアスでSHORT難。非JPYペア(EUR/USD, GBP/USD)はBreakoutで負け
-- **0424-001 (GBP/USD M15 SHORT)** が唯一のSHORT成功例 → FTS Paper投入済み
-- **H4 >> H1**: H4 breakout の Sharpe は H1 の3〜10倍
+### D値フェールゾーン (SL=1.5)
+| ペア | 通過D | 失敗D |
+|---|---|---|
+| USD/JPY H4 | D=3,5,10,12,15 | D=7 のみ |
+| GBP/JPY H4 | D=3,5,15 | D=7〜12 (広いフェールゾーン) |
+| EUR/JPY H4 | D=3,5,7,10,15 **全て通過** | なし |
 
-## 未コミット変更 / WIP コミット対象
+### TP=5.0 有効範囲
+- **有効**: D=3〜7 (短中期): USD/JPY D=3, EUR/JPY D=5,7, GBP/JPY D=3,5
+- **無効**: D=10以上 (長期): GBP/JPY D=15, USD/JPY D=10 はL1 FAIL
 
-なし（全コミット済み）
+### その他
+- **pips_per_unit=100** が JPY ペアの正解（10000 は NG。SL/TP が100倍ずれる）
+- **AUD/JPY、NZD/JPY** H4 breakout は L2 FAIL (carry効果弱)
+- **0424-001 (GBP/USD M15 SHORT)** FTS Paper 稼働中
+
+## FTS 状態
+
+- 戦略数: **64件** (ATLAS 60件 + FWDTEST等)
+- Runner: 稼働中 (最終再起動 2026-05-05)
+- 全戦略 Paper モード、live_eligible=false
+
+## 未コミット変更
+
+なし（全コミット・プッシュ済み）
 
 ## 次にやること
 
-### 高優先（最良探索）
-1. **GBP/JPY H4 D=4 TP=5** (126のTP伸長版) — D=20でTP=4→5でPASS実績。D=4でも有効か
-2. **EUR/JPY H4 Donchian (061型)** — 既存3件PASSで上限。別クラス設計で追加可能
-3. **USD/JPY H4 新設計**: D=4/5 の061型で別クラス名で試行 (USD/JPY H4は5PASS済みだが別クラスなら可)
+### 高優先
+1. **GBP/JPY D=5 TP=4.0 → SL=2.0 比較**: 131(SL=1.5 soft=0.827) vs 106(SL=2.0 soft=0.869) — SL=2.0 の優位性確認
+2. **EUR/JPY D=10 TP=5.0** (TP=5.0 中期D値の EUR/JPY 境界確認)
+3. **USD/JPY D=5 SL=1.5 TP=5.0** (130の TP 延長)
 
-### 多様化
-4. GBP/JPY H1 breakout long_only は L1 Sharpe=0.108で FAIL — H4に集中継続が効率的
-5. SHORT戦略: 構造的に難しい。現状 0424-001 が唯一の選択肢
+### 多様化検討
+4. H1 タイムフレームの再評価 (H4 >>H1 の法則から H4 集中継続が効率的)
+5. SHORT 戦略: 0424-001 が唯一の選択肢。現状維持
 
 ## 関連文書・コマンド
 
-- GBP/JPY H4 data: 7782 bars (5年分、WFA計算可能)
-- FTS: 次のRunner再起動で45戦略になる予定
-- 実行中ループ: 継続中
+- ATLAS CLAUDE.md: `C:\data\works\FX\ATLAS\CLAUDE.md`
+- FTS Runner: `fx_trading_system/scripts/start_unified_runner.ps1`
+- 最新 ATLAS commit: `2775dc8`
 
 ## Runner 状態
 
-- FTS Runner 稼働中（最終再起動 2026-05-04 17:49 JST）
-- Live: 2件 / Paper: 40件 → 再起動後45件予定
+- FTS Runner 稼働中（最終再起動 2026-05-05）
+- 64戦略 Paper モード
 
 ## 引継ぎ時の注意
 
-- **GBP/JPY H4 Donchian**: 各バリアントが異なるクラス名 → 各独立クラスタ → 無限に追加可能だが多様性観点で注意
-- **数種類のD値で FTS に絞る判断が必要**: 現在 D=4/5/6/7/8/10/12/15/20 全て FTS Paper。相関が高い
-- **FTS Runner は 45 戦略** → ウォームアップに長時間かかる
+- **pips_per_unit**: JPY ペアは `100`。非 JPY ペア (EUR/USD 等) は `10000`
+- **FTS Runner 再起動**: 新戦略追加後は `start_unified_runner.ps1` 実行必須
+- **ATLAS git**: 親 FX repo とは別管理 (`cd /c/data/works/FX/ATLAS && git push`)
+- **FTS 64 戦略**: ウォームアップ 30〜60 分かかる
+- **相関リスク**: 全戦略 JPY クロス LONG。JPY 急騰時に同時ドローダウン
