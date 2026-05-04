@@ -5,7 +5,7 @@
 
 ## 現在の作業（1 行サマリ）
 
-SHORT 戦略開発ループ完遂: 15 戦略生成 (073-087)・全 Gate PASS 失敗、ただし既存 ATLAS-2026-0424-001 が vectorbt 5.4.0 で **Tier 1 ALL PASS** 判明（FTS Paper 投入候補）
+SHORT 戦略開発ループ完遂: 16 戦略生成 (073-088)・全 Gate PASS 失敗、ただし既存 ATLAS-2026-0424-001 が vectorbt 5.4.0 で **Tier 1 ALL PASS** 判明（FTS Paper 投入候補）
 
 ## 詳細コンテキスト（5 行）
 
@@ -58,7 +58,7 @@ SHORT 戦略開発ループ完遂: 15 戦略生成 (073-087)・全 Gate PASS 失
 - L1: 616 trades, PF=1.10, Sharpe=0.39, WR=62.7%
 - L2: 696 trades, PF=1.01, Sharpe=0.07, MaxDD=12.1%
 
-## 改良試行の結果（4 通り全て失敗）
+## 改良試行の結果（6 通り全て失敗）
 
 | 改良アプローチ | 戦略 | 結果 |
 |---|---|---|
@@ -67,6 +67,7 @@ SHORT 戦略開発ループ完遂: 15 戦略生成 (073-087)・全 Gate PASS 失
 | H4 移植 | 083 | trades=28 で不足 (Tier1 #3 FAIL) |
 | H1 移植 | 084 | L2 まで進行も Tier1 #1, #4 FAIL |
 | balanced 化 (LONG/SHORT 対称追加) | 087 | LONG 取引が悪化を招き全体 PF=0.93 |
+| MTF H4 trend filter (downtrend only) | 088 | trades=0 (GBP/USD H4 downtrend が稀) |
 
 **結論**: 0424-001 のパラメータ + SHORT-only 設計は既に sweet spot で、改良は逆効果。
 
