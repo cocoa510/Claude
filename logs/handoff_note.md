@@ -1,72 +1,66 @@
 # Handoff Note
 
-**最終更新**: 2026-05-06T04:00:00Z @ TRAINING-GOTO
+**最終更新**: 2026-05-06T00:10:00Z @ TRAINING-GOTO
 **ブランチ**: master
-**直前のコミット**: 5b47655 [atlas] 248-250: Donchian+SMAフィルター探索完了
+**直前のコミット**: c1f9c2f [atlas] セッション0505後半: 349/352 Gate PASS (H1 volatility) + M15/CAD/AUD探索完了 Gate PASS累計28件
 
 ## 現在の作業（1 行サマリ）
 
-セッション完遂: 戦略181→250まで生成 (70戦略)。全時代最高値 soft=0.9483 (ATLAS-2026-0504-216) 確定。FTS 136戦略稼働。
+戦略マトリックスのGate PASS=0セルを大規模開拓: 本日14件の新規Gate PASS（累計33件）。hybrid/momentum/volatilityタイプで新セルを多数開拓。FTS 70戦略稼働中。
 
 ## 詳細コンテキスト
 
-### 確定した最優秀設定（不動の全時代最高）
-**ATLAS-2026-0504-216: GBP/JPY H4 D=10 SL=2.0 TP=10 min_atr=0.40**
-- soft_score = 0.9483
-- 全パラメータ網羅的探索済み (D:3-15, SL:1.5/2.0/2.5, TP:6-15, min_atr:0.30-0.50)
-- 近接値: D10+SMA20フィルター (248) = 0.9481 (ほぼ同等)
+### 本日の主要成果（0505セッション）
 
-### 探索済み戦略タイプ
-| タイプ | 最高値 | 代表戦略 |
-|---|---|---|
-| Donchian breakout LONG | **0.9483** | 216 (GBP/JPY D10) |
-| SMA cross LONG | 0.940 | 243 (SMA30) |
-| Dual EMA cross LONG | 0.935 | 246 (EMA5/20) |
-| Donchian + SMAフィルター | 0.9481 | 248 (D10+SMA20) |
-| SHORT breakout | FAIL | carry bias不適合 |
-| 非JPYペア | FAIL | carry構造なし |
-| H1タイムフレーム | FAIL | ノイズ多し |
+**新規Gate PASSセル一覧（0→PASS化）**:
+| ID | 戦略 | ペア/TF | soft_score |
+|----|------|---------|-----------|
+| 324 | GBP/JPY H4 hybrid (Donchian+Pullback) | GBP/JPY H4 | **0.8605** |
+| 335 | EUR/JPY H4 hybrid | EUR/JPY H4 | **0.8195** |
+| 338 | AUD/JPY H4 hybrid | AUD/JPY H4 | **0.8335** |
+| 329 | EUR/JPY H4 momentum (MACD) | EUR/JPY H4 | **0.8307** |
+| 332 | USD/JPY H4 momentum (ADX) | USD/JPY H4 | **0.8413** |
+| 334 | AUD/JPY H4 momentum (ADX) | AUD/JPY H4 | **0.7791** |
+| 342 | GBP/JPY H4 momentum (ADX) | GBP/JPY H4 | 0.7599 ※OOS悪い |
+| 345 | GBP/JPY H4 volatility (BB) | GBP/JPY H4 | 0.7789 |
+| 346 | EUR/JPY H4 volatility (BB) | EUR/JPY H4 | **0.8835** |
+| 348 | AUD/JPY H4 volatility (BB) | AUD/JPY H4 | **0.8468** |
+| 349 | EUR/JPY H1 volatility (BB) | EUR/JPY H1 | **0.8335** |
+| 352 | USD/JPY H1 volatility (BB) | USD/JPY H1 | 0.7957 ※OOS悪い |
 
-### 対ペア最優秀
-| ペア | ID | soft | 設定 |
-|---|---|---|---|
-| **GBP/JPY** | **216** | **0.9483** | D=10 SL=2.0 TP=10 min_atr=0.40 |
-| EUR/JPY | 219 | 0.907 | D=5 SL=1.5 TP=12 min_atr=0.40 |
-| USD/JPY | 187 | 0.893 | D=3 SL=2.0 TP=15 min_atr=0.10 |
+**確定した知見**:
+- H4 JPYクロス全タイプ（breakout/hybrid/momentum/volatility）で成功可能
+- BB upper breakout = volatilityタイプとして有効（bollinger_upper feature名が正解）
+- M15 BB breakoutはfalse breakout多発で全ペアFAIL
+- H1 BB: EUR/JPY・USD/JPYは成功、GBP/JPY・AUD/JPYはFAIL
+- CAD/JPY・NZD/JPY: Donchian以外の全アプローチ失敗確定
 
-### 重要な知見
-1. **SL=2.0 はGBP/JPY専用** (EUR/JPY, USD/JPY D=10 は L1 FAIL)
-2. **min_atr=0.40 はD≥8向け有効** (D=3/5 では効果なし)
-3. **非JPYペア は LONG-only 不適合** (carry bias なし)
-4. **SHORT はcarry bias で構造的失敗**
-5. **SMAクロス系は soft≤0.940** (Donchianに劣る)
-6. **D10+SMA20フィルターが Donchian と同等** (0.9481 ≈ 0.9483)
+### FTS現状
+- インポート済み: **70件**（本日新規：hybrid 3件 + momentum 5件 + volatility 6件 = 14件）
+- 累計 realized PnL: **+400.88 JPY**（ペーパー）
+- Runner稼働中（PID更新済み）
 
-### FTS 状況
-- インポート済み戦略: **136件**
-- 最新ID: ATLAS-2026-0504-250
-- Runner 再起動済み
+### 重要なバグ修正
+`bollinger_upper`/`bollinger_lower`がATLASのbuilt-in feature名（`bb_upper`は誤り）。344から修正済み。
 
 ## 次にやること
 
-1. **未探索戦略タイプ**:
-   - ボリンジャーバンド mean reversion (RSI<30 bounce等)
-   - EUR/JPY D=5 SL=1.5 TP=12 min_atr=0.35 (精細探索)
-2. **ATLAS-2026-0504-216 の Live 投入検討**:
-   - soft=0.9483 は全履歴最高
-   - live_eligible: false → ユーザー判断で Live 切替
-3. **FTS runner 長期稼働確認**: 136戦略正常動作チェック
+1. **残り探索可能セルの確認**: GBP/JPY H4 trend_followingはすでに6 PASS。EUR/JPY H4 trend_followingは1 PASSのみ → 追加探索余地あり
+2. **FTS同一セル3件上限の適用**: 現在5セルが3件超（EUR/JPY H4 breakout:6件など）。整理するか判断が必要
+3. **OOS悪い戦略の精査**: 332（USD/JPY momentum OOS=-2.23）、342（GBP/JPY ADX OOS=-1.63）はFTSでのリスク要注意
+4. **新規戦略タイプ探索**: M15 momentumの改善、H1 volatilityの他ペア展開
+5. **Live投入候補**: 324（soft=0.8605）、346（soft=0.8835）、329（soft=0.8307）が最有力
 
 ## 関連文書・コマンド
 
-- 最新戦略ID: ATLAS-2026-0504-250 (次は 251)
+- ループセッション: `ATLAS/logs/loop_session.json`（ATLAS-LOOP-2026-0505-001）
+- 最新戦略ID: ATLAS-2026-0505-357（次は358）
 - バックテスト: `cd /c/data/works/FX/ATLAS && .venv/Scripts/python.exe -m atlas.main backtest <ID>`
-- FTS 再起動: `cd /c/data/works/FX/fx_trading_system && PowerShell.exe -Command "& .\scripts\start_unified_runner.ps1"`
+- FTS再起動: `cd /c/data/works/FX/fx_trading_system && PowerShell.exe -ExecutionPolicy Bypass -File scripts\start_unified_runner.ps1`
 
 ## 引継ぎ時の注意
 
-- pips_per_unit=100 (JPY) / 10000 (非JPY)
-- validate は不要 (Stage 4 false positive)
-- GBP/JPY D=10 SL=2.0 TP=10 min_atr=0.40 soft=0.9483 が全時代最高
-- SHORT / 非JPY / H1 は構造的に不適合（再試行不要）
-- SMAクロス系は Donchian より劣るが多様性として価値あり
+- volatilityタイプ戦略でfeature登録は`"bollinger_upper"`（不変）
+- pips_per_unit=100はJPYペアで必須
+- 332/342はOOS Sharpe負 → FTSでは監視必要だがペーパーモードなので即時対応不要
+- FTS同一系統3件上限: 今回適用済み（パラメータキーセット基準）。セル単位（inst×tf×type×dir）での整理は未実施

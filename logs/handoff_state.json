@@ -1,58 +1,53 @@
 {
-  "generated_at": "2026-05-04T08:15:00Z",
+  "generated_at": "2026-05-06T00:10:00Z",
   "hostname": "TRAINING-GOTO",
   "branch": "master",
-  "head_sha": "54831fa",
+  "head_sha": "06d65ab",
   "uncommitted_files": [],
-  "metrics_schema_version": "5.4.0",
+  "atlas_head_sha": "c1f9c2f28266343f5ec68b3465bb0184b4e071d8",
+  "latest_commits": [
+    {"sha": "c1f9c2f", "subject": "[atlas] セッション0505後半: 349/352 Gate PASS (H1 volatility) + M15/CAD/AUD探索完了", "date": "2026-05-06"},
+    {"sha": "462b740", "subject": "[atlas] 346/348 Gate PASS (EUR/JPY soft=0.8835, AUD/JPY soft=0.8468)", "date": "2026-05-06"},
+    {"sha": "4dce2cb", "subject": "[atlas] 345 GBP/JPY H4 volatility Gate PASS (soft=0.7789) + bollinger feature bugfix", "date": "2026-05-06"}
+  ],
   "fts_runner": {
     "status": "running",
-    "pid": 12080,
-    "started_at": "2026-05-04T04:58:48Z",
-    "discovery_total": 34,
-    "live_count": 2,
-    "paper_count": 32
+    "imported_strategies": 70,
+    "realized_pnl_jpy": 400.88
   },
-  "oanda_account": {
-    "balance": 307833.34,
-    "open_positions": 0,
-    "currency": "JPY"
-  },
-  "session_summary": {
-    "user_directive": "許可確認なしで戦略開発ループを回し続ける",
-    "strategies_generated": 16,
-    "strategies_gate_passed": 0,
-    "range": "ATLAS-2026-0504-073 〜 ATLAS-2026-0504-088",
-    "duration_hours_approx": 3.7,
-    "important_discovery": {
-      "strategy_id": "ATLAS-2026-0424-001",
-      "display_name": "GBPUSD-MeanRev-Short-M15-001",
-      "tier1_all_passed": true,
-      "tier2_soft_score": 0.3521,
-      "overall_passed": false,
-      "l2_primary": {"profit_factor": 1.0088, "sharpe_ratio": 0.0737, "total_trades": 696, "bh_excess_return_pct": 0.65},
-      "l2_secondary": {"profit_factor": 0.9436, "total_trades": 682},
-      "deployment_decision": "要ユーザー判断（Tier 1 ALL PASS / overall=false）"
+  "gate_pass_summary": {
+    "total": 33,
+    "today_new": 14,
+    "best": {
+      "id": "ATLAS-2026-0504-098",
+      "soft_score": 0.9504,
+      "display": "USDJPY-Breakout-Long-M15"
     },
-    "improvement_attempts_failed": [
-      "081: 厳格化 (WR 62.7→34.6%)",
-      "082: RR=1.5 + early exit (Sharpe 0.39→0.19)",
-      "083: H4 移植 (trades=28)",
-      "084: H1 移植 (L2 Tier1 FAIL)",
-      "087: balanced 化 (LONG 取引が悪化)",
-      "088: MTF H4 trend filter (trades=0)"
-    ],
-    "data_fetched_new": [
-      "EUR_USD H4 + secondary", "GBP_JPY M15/H1/H4 + secondary", "GBP_USD H4 + secondary"
+    "today_highlights": [
+      {"id": "ATLAS-2026-0505-324", "soft": 0.8605, "cell": "GBP/JPY H4 hybrid"},
+      {"id": "ATLAS-2026-0505-346", "soft": 0.8835, "cell": "EUR/JPY H4 volatility"},
+      {"id": "ATLAS-2026-0505-349", "soft": 0.8335, "cell": "EUR/JPY H1 volatility"},
+      {"id": "ATLAS-2026-0505-329", "soft": 0.8307, "cell": "EUR/JPY H4 momentum"}
     ]
   },
-  "loop_session_active": false,
+  "known_failures": {
+    "M15_BB_volatility": "全ペアでfalse breakout多発（trades=1000+）",
+    "H1_BB": "EUR/JPY・USD/JPYのみ有効。GBP/JPY・AUD/JPYはFAIL",
+    "CAD_JPY": "全手法失敗（Donchian ceiling=0.7226）",
+    "NZD_JPY": "全手法失敗",
+    "SHORT_strategies": "carry bias構造的失敗",
+    "non_JPY": "EUR_USD/GBP_USD構造的失敗",
+    "H4_JPY_mean_reversion": "7回連続FAIL確定"
+  },
+  "loop_session_active": true,
+  "loop_session_id": "ATLAS-LOOP-2026-0505-001",
+  "latest_strategy_id": "ATLAS-2026-0505-357",
+  "next_strategy_id": "ATLAS-2026-0505-358",
   "next_actions": [
-    "[要判断] ATLAS-2026-0424-001 FTS Paper 投入 (Tier 1 ALL PASS / overall=false)",
-    "WFA Efficiency / Strategy Drift null 原因調査",
-    "セッション限定 SHORT / reverse momentum SHORT 探索",
-    "rescue_candidates 0430-005 アンサンブル化 (HIGH 優先)",
-    "Per-Symbol/Direction Net Exposure Cap (P3)",
-    "Promotion Gate 形式化 (Paper → Live 昇格基準)"
+    "EUR/JPY H4 trend_following追加探索（現在1 PASS、soft=0.8769。追加改善余地あり）",
+    "FTS同一セル3件上限の適用判断（現在5セルが3件超）",
+    "OOS悪い戦略の精査: 332（OOS=-2.23）、342（OOS=-1.63）",
+    "GBP/JPY H4 volatility改善（345, soft=0.7789 → 0.80+を目指す）",
+    "新セル開拓: GBP/JPY H4 trend_followingの更なる最適化"
   ]
 }
