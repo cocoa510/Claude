@@ -10,7 +10,7 @@
 - `--target-score <S>` — 目標スコア（デフォルト: 0.75）
 - `--types <type1,type2,...>` — 戦略タイプローテーション順序を明示指定
 - `--no-rotate` — タイプ自動ローテーションを無効化（系統廃棄時にループ停止）
-- `--direction <bias>` — 方向制約（`any` / `long_only` / `short_only` / `balanced`）。デフォルト: `any`。Period Bias対策でSHORT戦略を強制生成する場合に `short_only` を指定
+- `--direction <bias>` — 方向制約（`long_only` / `short_only` / `balanced` の3択）。デフォルト: `balanced`。Period Bias対策でSHORT戦略を強制生成する場合に `short_only` を指定。**`any` は 2026-05-11 廃止**（Tier1#6 適用外で Gate ゲーミング抜け穴のため）
 - `--dry-run` — 実行計画のみ表示（実行しない）
 - 例: `trend_following USDJPY --max-generations 5`
 - 例: `trend_following USDJPY --types trend_following,breakout,mean_reversion`
@@ -50,7 +50,7 @@ trend_following / mean_reversion / breakout / momentum / volatility / hybrid
   "session_start": "2026-04-18T10:00:00Z",
   "limit_minutes": 300,
   "threshold_pct": 94,
-  "direction_bias": "any",
+  "direction_bias": "balanced",
   "available_types": ["trend_following", "mean_reversion", "breakout", "momentum", "volatility", "hybrid"],
   "current_type": "trend_following",
   "current_gen_id": "ATLAS-2026-0418-005",
