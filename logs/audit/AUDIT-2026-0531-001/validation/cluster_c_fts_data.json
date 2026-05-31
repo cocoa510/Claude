@@ -1,0 +1,1071 @@
+{
+  "schema_version": "1.0",
+  "cluster": "C",
+  "cluster_name_ja": "FTS データ・テスト・運用領域",
+  "validator": "devil-advocate",
+  "audit_id": "AUDIT-2026-0531-001",
+  "validated_at": "2026-06-01",
+  "mode": "dry-run",
+  "target_commits": {
+    "fts_head": "fca45f23"
+  },
+  "cross_finding_dedup": [
+    {
+      "subject": "main.py 経路 backfill dead path",
+      "canonical_finding": "DE-503",
+      "duplicates": [
+        "DE-504"
+      ],
+      "rationale": "DE-503 (OANDAStreamReceiver) と DE-504 (CandleFetcher) は同一経路 (main.py dev/staging) の別コンポーネントの backfill 配線欠落。fix PR 統合すべき。",
+      "confirmed_severity": "medium"
+    },
+    {
+      "subject": "strategy_id ラベル欠如",
+      "canonical_finding": "DE-501",
+      "duplicates": [
+        "DE-505"
+      ],
+      "rationale": "DE-501 (staleness メトリクス) と DE-505 (buffer_at_cap gauge) は同一根因 (LiveFeatureStore が strategy_id を持たない) による別症状。fix PR 統合すべき。",
+      "confirmed_severity": "medium (両者とも格下げ後)"
+    },
+    {
+      "subject": "CI ワークフロー統合問題",
+      "canonical_finding": "QA-605",
+      "duplicates": [
+        "DM-508"
+      ],
+      "rationale": "QA-605 と DM-508 はいずれも parity.yml 単一ワークフローによる問題。unit.yml 分離で両方解決。",
+      "confirmed_severity": "low"
+    },
+    {
+      "subject": "tests/performance CI 除外未実施",
+      "canonical_finding": "QA-610",
+      "duplicates": [
+        "QA-620"
+      ],
+      "rationale": "QA-610 と QA-620 は両方 tests/performance が CI --ignore 外の問題。fix PR 統合。",
+      "confirmed_severity": "low"
+    }
+  ],
+  "findings_review": [
+    {
+      "finding_id": "DE-501",
+      "source_agent": "data-engineer",
+      "claimed_severity": "high",
+      "verdict_severity": "medium",
+      "verdict": "severity_downgrade",
+      "dedup_with": [
+        "DE-505"
+      ],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "alerting_rules.yml に ADVISORY として明文化済み。per-TF slicing は primary_tf ラベルで代替可能。実被害 = Prometheus ラベルの意味論的不整合のみ。Parity/資金への直接影響なし。",
+          "evidence": "CONFIRMED live_store.py:449 で self.primary_tf を strategy_id 引数に渡している。metrics.py:892 に Phase 4.5 ADVISORY として明文化。alerting_rules.yml:193-196 に既知課題として記載。",
+          "counter_proposal": "severity を medium に格下げ。DE-505 と同一 fix PR 統合。LiveFeatureStore コンストラクタに strategy_id 注入。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "real_finding_severity_medium"
+    },
+    {
+      "finding_id": "DE-502",
+      "source_agent": "data-engineer",
+      "claimed_severity": "critical",
+      "verdict_severity": "high",
+      "verdict": "severity_downgrade",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "通常運用 (M15+poll_interval=60s) では発生せず backlog 発生時のみ影響。DE-304 known-deferred 問題の延長線上にある。AUDIT-2026-0529-001 で DE-304 は medium 相当と判断済み。new critical 発見ではない。",
+          "evidence": "CONFIRMED data_provider.py:251 で raw_candles[-1] のみを返す。data_provider.py:48 に最終バーのみを on_bar に流す既存挙動を維持 (別タスク) と明記。runner.py:1783 で single bar が StrategySlot.on_bar に渡される。",
+          "counter_proposal": "severity を high に格下げ。中間バー drop 計測カウンタ fx_poll_backlog_dropped_total 追加を推奨。",
+          "adoption_level": "must_fix"
+        }
+      ],
+      "post_fix_defect_assessment": "real_finding_severity_high"
+    },
+    {
+      "finding_id": "DE-503",
+      "source_agent": "data-engineer",
+      "claimed_severity": "high",
+      "verdict_severity": "medium",
+      "verdict": "severity_downgrade",
+      "dedup_with": [
+        "DE-504"
+      ],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "UnifiedRunner (本番経路) は OANDAStreamReceiver を使用しない。main.py は dev/staging FastAPI 経路であり本番 live 取引には影響しない。high は本番運用に即時影響がある問題に使うべき。",
+          "evidence": "CONFIRMED main.py:977-987 で OANDAStreamReceiver に backfill 系引数が一切渡されていない。runner.py:270-272 で UnifiedRunner が SharedDataProvider polling を使用。main.py は非本番経路。",
+          "counter_proposal": "severity を medium に格下げ。DE-504 と同一 fix PR で対応。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "real_finding_severity_medium"
+    },
+    {
+      "finding_id": "DE-504",
+      "source_agent": "data-engineer",
+      "claimed_severity": "high",
+      "verdict_severity": "medium",
+      "verdict": "severity_downgrade",
+      "dedup_with": [
+        "DE-503"
+      ],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "DE-503 と同一根拠。main.py 経路は本番ではなく dev/staging 経路。UnifiedRunner が CandleFetcher に依存しないことをコードで確認済み。",
+          "evidence": "CONFIRMED main.py:805-814 で CandleFetcher コンストラクタに state_store 引数が渡されていない。runner.py で CandleFetcher 参照なし (SharedDataProvider のみ)。",
+          "counter_proposal": "severity を medium に格下げ。DE-503 と同一 PR で fix する。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "real_finding_severity_medium"
+    },
+    {
+      "finding_id": "DE-505",
+      "source_agent": "data-engineer",
+      "claimed_severity": "high",
+      "verdict_severity": "medium",
+      "verdict": "severity_downgrade",
+      "dedup_with": [
+        "DE-501"
+      ],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "gauge 上書き問題は observability の劣化であり取引判断・資金管理への直接影響はない。buffer_at_cap の誤表示が dashboard に出るが PTRC / BrokerGateway には影響しない。DE-501 と同一修正経路で解決。",
+          "evidence": "live_store.py:505-508 と metrics.py:510-527 の primary_tf のみラベル化を確認。gauge 上書きの実害 = ダッシュボード誤表示のみ。",
+          "counter_proposal": "severity を medium に格下げ。DE-501 と同一 PR で修正。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "real_finding_severity_medium"
+    },
+    {
+      "finding_id": "DE-506",
+      "source_agent": "data-engineer",
+      "claimed_severity": "high",
+      "verdict_severity": "high",
+      "verdict": "confirmed_with_caution",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "DE-506 recommendation の increase()>0 for:0m は volume=0 (illiquid) バー (DE-510 参照) と組み合わさると週末明けに毎週 false positive アラートが発火する。DE-510 修正前に追加すると運用ノイズが増大する。",
+          "evidence": "CONFIRMED alerting_rules.yml 全体に fx_data_quality_forced_publish_total 対応ルールなし。metrics.py:760 にカウンタ定義は存在する。DE-510 指摘通り volume=0 バーは OANDA 実運用で発生する正常事象。",
+          "counter_proposal": "DE-506 アラート追加は DE-510 (volume=0 ペナルティ修正) と同一リリースに含める。または increase(...[10m])>3 等の閾値を設けて誤発火を防ぐ。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_implement_with_DE-510_caution"
+    },
+    {
+      "finding_id": "DE-507",
+      "source_agent": "data-engineer",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "fx-strategist が std_dev と std の両方を埋める確率を定量評価していない。発生確率が実質 0 の場合 medium は過大評価の可能性がある。",
+          "evidence": "finding 記述の indicators.py:147-183 で FTS 側 ValueError。vectorbt_engine.py:593-600 で ATLAS 側 silent 優先を確認。",
+          "counter_proposal": "実在 config での双方指定件数が 0 であれば severity を low に格下げ可。ATLAS 側 fail-fast 化は引き続き推奨。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed"
+    },
+    {
+      "finding_id": "DE-508",
+      "source_agent": "data-engineer",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "DE-403 修正の設計意図は次バー到達遅延であり monotonic タイマーはこの用途に適している。bar timestamp ベースへの変更は OANDA 配信遅延の計測目的では有効だが FTS の設計スコープと目的が異なる可能性がある。要件明確化が先決。",
+          "evidence": "CONFIRMED live_store.py:215-219 で _last_primary_bar_time = time.monotonic() ベース。live_store.py:438-441 コメントに次バー到達遅延の設計意図が明文化。",
+          "counter_proposal": "medium は妥当。修正前に何を計測したいかの要件を確定すること。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed"
+    },
+    {
+      "finding_id": "DE-509",
+      "source_agent": "data-engineer",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed_pending_verification",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "finding は test_feature_store_parity_buffer_trim.py の存在と内容を未確認のまま記述している。もし trim 後の EWM ドリフト検証テストが既に存在する場合 medium は過大評価になる。",
+          "evidence": "CONFIRMED parity_test.py:27-55 で 300 本固定 fixture。finding 末尾に要確認との留保あり。",
+          "counter_proposal": "test_feature_store_parity_buffer_trim.py の実内容確認後に severity 確定。既存カバーがあれば low に格下げ可。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_pending_buffer_trim_test_review"
+    },
+    {
+      "finding_id": "DE-510",
+      "source_agent": "data-engineer",
+      "claimed_severity": "medium",
+      "verdict_severity": "low",
+      "verdict": "severity_downgrade",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "weight=0.05 単独では min_quality_score=0.7 を下回らない (1.0-0.05=0.95 >= 0.70)。finding 自体が単発で即 FAIL にはならないと認めている。影響は DE-506 アラート追加後の false positive 増加に限定。単独では low が妥当。",
+          "evidence": "CONFIRMED quality_engine.py:809-821 の閾値確認。weight=0.05 単独では閾値到達不可能。DE-506 アラート化前は実害なし。",
+          "counter_proposal": "severity を low に格下げ。DE-506 と同一リリースで修正。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "real_finding_severity_low"
+    },
+    {
+      "finding_id": "DE-511",
+      "source_agent": "data-engineer",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed_non_issue",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "Parity 問題の不在を確認した観察報告であり批判すべき内容は実質ない。将来ドリフトに対するメタテスト追加の提案は有効。",
+          "evidence": "CONFIRMED live_store.py:703-716 で allow_exact_matches=False。atlas/data_loader.py:752-762 で同じく allow_exact_matches=False かつ同 ID 参照。SHARED_CONTRACT 維持。",
+          "counter_proposal": "現状確認 OK。metatest 追加を将来タスクとして記録。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "non_issue_low"
+    },
+    {
+      "finding_id": "DE-512",
+      "source_agent": "data-engineer",
+      "claimed_severity": "medium",
+      "verdict_severity": "low",
+      "verdict": "severity_downgrade",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "DE-311 で本番経路は StateManager で別系統なので致命ではないと判断済み。本番 UnifiedRunner が StateStore を経由しないことをコードで確認した。複数監査ラウンドで持ち越されている tech debt として low が妥当。",
+          "evidence": "CONFIRMED redis_store.py:18-34 で DE-005/DE-311 docstring が未実装を自認。runner.py で UnifiedRunner は StateManager を使用し StateStore に依存しない。",
+          "counter_proposal": "severity を low に格下げ。ADR 化 + 本番運用方針の明文化を優先。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "real_finding_severity_low"
+    },
+    {
+      "finding_id": "DE-513",
+      "source_agent": "data-engineer",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "finding が正しく指摘する通り Gauge に rate/increase を使うのは意味がない。TF 別の for 設定 (M15: for 16m, H1: for 65m, H4: for 250m) が最も実用的な即効策。recommendation の max sustaining gauge は Prometheus ではネイティブ手段がない。",
+          "evidence": "CONFIRMED alerting_rules.yml:157-180 で for: 3m 設定。live_store.py:443-460 で毎バー set するため M15 では for: 3m は実質発火不能。",
+          "counter_proposal": "即効策: alerting_rules.yml の for: 3m を TF 別に設定。恒久策: histogram 化。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed"
+    },
+    {
+      "finding_id": "DE-514",
+      "source_agent": "data-engineer",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "spread_check_mode がデフォルト disabled であれば現状は問題なし。切替時のリスクを runbook に記録すべき提案は有効。low 妥当。",
+          "evidence": "CONFIRMED quality_engine.py:120-124 で spread_check_mode デフォルト disabled。quality_engine.py:108-120 に二段階ロールアウトコメント存在。",
+          "counter_proposal": "low 維持。runbook 化は優先度低。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "non_issue_low"
+    },
+    {
+      "finding_id": "DE-515",
+      "source_agent": "data-engineer",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "conftest.py 1 行追記で済ませる developer の誤認は実際に起こりやすい。PARITY_COVERED に追記されても実装テストが書かれない隠れた緩和が発生しているか CI 履歴を確認する価値がある。",
+          "evidence": "CONFIRMED parity_test.py:300-316 で frozenset hardcode。conftest.py:29-49 で covered list。",
+          "counter_proposal": "low 維持。将来の指標追加時に同時対応を求める。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed"
+    },
+    {
+      "finding_id": "DE-516",
+      "source_agent": "data-engineer",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed_non_issue",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "finding 自体がリスク低と認めている。OANDA v20 API 専用システムとして現状変更不要。",
+          "evidence": "CONFIRMED quality_engine.py:736-786 で UTC ベース実装。OANDA v20 API 専用で DST 切替の実害なし。",
+          "counter_proposal": "low 維持。現状変更不要。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "non_issue_low"
+    },
+    {
+      "finding_id": "DM-501",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "high",
+      "verdict_severity": "high",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "FxStalePnlTransientSkipHigh アラートが永久 Inactive との主張は正確。OANDA 障害時の検知遅延が主なリスク。修正方法は明確 (StrategySlot.__init__ に metrics 引数追加 + runner.py 生成箇所に metrics=self._metrics 追加) であり変更コストは低い。DM-506 の set_signal_silence_sec 追加も同 PR に同梱推奨。",
+          "evidence": "CONFIRMED strategy_slot.py:151-200 で StrategySlot.__init__ に metrics パラメータが存在しない (9 引数のみ)。strategy_slot.py:1967-1985 で getattr(self, _metrics, None) が常に None を返す。runner.py:781-793 で StrategySlot() 生成時に metrics= 引数なし。runner.py:455-481 の set_metrics_collector 配線ループに StrategySlot が含まれていない。",
+          "counter_proposal": "high 維持。DM-506 と同一 PR で対応。",
+          "adoption_level": "must_fix"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_high"
+    },
+    {
+      "finding_id": "DM-502",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "8 種のアラートルール欠如を一律 medium で括っているが影響の深刻度は異なる。fx_feature_store_compute_errors_total (Parity 破壊) と fx_slippage_missing_total では重要度が大きく異なる。優先度分割が必要。",
+          "evidence": "CONFIRMED alerting_rules.yml 全体に 8 カテゴリのアラートルールが未定義。DE-506 (forced_publish) は DM-502 の (4) と重複するが独立指摘として許容。",
+          "counter_proposal": "Phase 1 (Parity 関連): fx_data_quality_forced_publish + fx_feature_store_compute_errors を先行実装。Phase 2 (運用可視性): 残 6 種。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed"
+    },
+    {
+      "finding_id": "DM-503",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "日曜 22:00-23:59 UTC は OANDA 開場直後でボラティリティが低い時間帯。alerting_rules.yml に 1 行追加で解決可能。",
+          "evidence": "CONFIRMED alerting_rules.yml:142-156 でコメントに既知制約として明記。",
+          "counter_proposal": "low 維持。1 行追加での対応を推奨。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "DM-504",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "finding は合計最大 3 秒のブロックと記述するが asyncio.to_thread で非同期化されているため event loop はブロックされない。実際のリスクは 3 回認証試行による通知遅延と failure カウンタ 3 回加算によるアラート誤発火。notify_email_enabled=False がデフォルトのため Gmail 534 が発生する条件は限定的。",
+          "evidence": "CONFIRMED email_notifier.py:1189-1228 で except Exception で全例外を補足。email_notifier.py:1191 で await asyncio.to_thread(...) で非同期化済み。settings.py:204 notify_email_enabled=False デフォルト。",
+          "counter_proposal": "medium 維持。SMTPAuthenticationError の早期脱出は低コスト修正。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed"
+    },
+    {
+      "finding_id": "DM-505",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "Dashboard は閲覧専用で取引判断には使われない。stale 表示の実害は運用者の誤判断のみで資金損失直結なし。low 妥当。",
+          "evidence": "finding 記述通り dashboard/app.py:63-139 で stale 検出ロジックなし。Dashboard は読み取り専用 UI。PTRC / BrokerGateway とは非連動。",
+          "counter_proposal": "low 維持。last_heartbeat タイムスタンプ追加は有用。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "DM-506",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "low",
+      "verdict_severity": "medium",
+      "verdict": "severity_upgrade",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "DM-501 (StrategySlot._metrics が常に None) と組み合わせると影響が二重になる。DM-501 を修正して StrategySlot に metrics を注入しても strategy_slot.py に set_signal_silence_sec がないため fx_signal_silence_sec は依然更新されない。M-O2 (PR50) の監視目的が本番で達成されないことは DM-501 修正後も継続する独立問題。INC-2026-0527-001 等の連鎖障害の早期発見に寄与する。",
+          "evidence": "CONFIRMED strategy_slot.py に _last_signal_at および set_signal_silence_sec の記述なし (Grep で 0 件)。worker.py:373-376 で唯一の呼び出しが worker.py にのみ存在。本番経路では呼ばれない。MEMORY.md INC-2026-0527-001。",
+          "counter_proposal": "severity を medium に格上げ。DM-501 修正 PR に同梱して strategy_slot.py に _last_signal_at + set_signal_silence_sec 追加を含める。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "real_finding_severity_medium"
+    },
+    {
+      "finding_id": "DM-507",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "コードベースへの個人メールアドレスのコミットは CLAUDE.md のポリシー (APIキー等の秘密情報はコードに直書きしない) に明確に違反する。notify_email_enabled=False がデフォルトのため実際の誤送信条件は限定的だが修正コストは極低。",
+          "evidence": "CONFIRMED settings.py:211-217 で notify_email_to: str = Field(default=510.cocoa@gmail.com, ...) とハードコードされていることを実コードで確認。notify_email_enabled=False デフォルト確認済み。CLAUDE.md ポリシー確認済み。",
+          "counter_proposal": "medium 維持。default=empty string への変更を即実施。",
+          "adoption_level": "must_fix"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_medium"
+    },
+    {
+      "finding_id": "DM-508",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed_duplicate_of_QA-605",
+      "dedup_with": [
+        "QA-605"
+      ],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "QA-605 と同一根因 (parity.yml 単一ワークフロー) の別側面 (通知件名)。unit.yml 分離で両方解決する。統合して QA-605 を canonical とすべき。",
+          "evidence": "CONFIRMED parity.yml:95-113 で finding 記述通り単一ワークフロー兼務。QA-605 と同一箇所を指摘。",
+          "counter_proposal": "DM-508 を QA-605 の duplicate として扱い fix PR を統合。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "duplicate_of_QA-605"
+    },
+    {
+      "finding_id": "DM-509",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "low",
+      "verdict_severity": "invalid",
+      "verdict": "rejected_incorrect_premise",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "DM-509 の核心的主張 (critical コンポーネントの degraded を unhealthy に昇格しないため /health が healthy を返し続ける) は実コードと矛盾する。health_check.py:498-499 で comp.status == degraded は has_degraded=True を立てる。check_all の status キーは degraded の場合 unhealthy として返される (line 212)。is_healthy も False を返す。",
+          "evidence": "CONFIRMED health_check.py:212 で (healthy if system_status==healthy else unhealthy)。health_check.py:236 で return self._aggregate_system_status()==healthy。health_check.py:498-499 で elif comp.status==degraded: has_degraded=True。",
+          "counter_proposal": "finding を reject。ただし system_status=degraded と unhealthy の違いが外部 API の status キーに現れない点は informational として将来改善候補として記録可。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "invalid_incorrect_premise"
+    },
+    {
+      "finding_id": "DM-510",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "Python 3.7+ の asyncio.Task は contextvars.copy_context でコンテキストをコピーするため別タスクへの漏洩リスクは構造的に抑制されている。unbind_contextvars が例外時にスキップされる場合の影響は同一 Task 内の後続処理への漏洩に限定される。low 妥当。",
+          "evidence": "finding 記述通り strategy_slot.py:574-591 で bind_contextvars + unbind_contextvars が try/finally でない可能性。Python 3.7+ asyncio: 各タスクは contextvars.copy_context() で独立したコンテキストを持つ。",
+          "counter_proposal": "low 維持。with structlog.contextvars.bound_contextvars(...) への変更は低コスト。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "QA-601",
+      "source_agent": "qa-tester",
+      "claimed_severity": "high",
+      "verdict_severity": "medium",
+      "verdict": "severity_downgrade_partial_validity",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "finding は ast.Call パターン (def f(x=__import__(os)): pass) がカバーされていないと主張するが ast.walk の全ノード走査により検出される可能性が高い。一方 MEMORY.md の原典攻撃 CSR-101 は ast.Name のみパターン (def f(x=__import__): pass) であり loader.py の ast.Name チェックが __builtins__ のみ対象のため本当に未カバーである可能性が高い。finding は攻撃パターンの説明が不正確だが実際にテストに追加すべきケースが実在することは正しい。",
+          "evidence": "CONFIRMED test_strategy_loader_ast_dynamic_exec.py:26-33 の parametrize リストに当該パターンは含まれない。loader.py:163-191 で ast.walk ループが isinstance(node, ast.Call) を検査し _DANGEROUS_CALLS に __import__ が含まれる。loader.py:186 で isinstance(node, ast.Name) and node.id in (__builtins__,) で __import__ は含まれない。",
+          "counter_proposal": "severity を medium に格下げ。ast.Call パターンと ast.Name のみパターンの 2 種を parametrize に追加して実際の検出結果を実証。ast.Name パターンが未検出であれば loader.py の ast.Name チェックに __import__ を追加する修正を行う。",
+          "adoption_level": "must_fix"
+        }
+      ],
+      "post_fix_defect_assessment": "partial_real_finding_severity_medium"
+    },
+    {
+      "finding_id": "QA-602",
+      "source_agent": "qa-tester",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "fills_completed==0 が戦略の発火条件不一致である可能性を finding も認めている。E2E フロー自体が壊れていても本テストは PASS する (偽緑) という指摘は正確。pytest.xfail で追跡可能にすることは妥当。",
+          "evidence": "CONFIRMED test_signal_flow.py:294-310 で fills_completed==0 分岐が warnings.warn のみで終了。",
+          "counter_proposal": "medium 維持。pytest.xfail への変更 + 強制発火 fixture の追加を推奨。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed"
+    },
+    {
+      "finding_id": "QA-603",
+      "source_agent": "qa-tester",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "QT-305 コメントで DE-311 完了後の fakeredis 移行を自認している既知問題。DE-311 完了が前提条件であることを明記すること。",
+          "evidence": "CONFIRMED tests/fault/conftest.py:105-149 で FaultRedisBackend._inner = InMemoryBackend()。QT-305 コメントでプロトコル非互換が明記されている。",
+          "counter_proposal": "medium 維持。DE-311 完了後に fakeredis 移行を同梱。現時点では xfail マーク追加を先行実施。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_blocked_by_DE-311"
+    },
+    {
+      "finding_id": "QA-604",
+      "source_agent": "qa-tester",
+      "claimed_severity": "medium",
+      "verdict_severity": "low",
+      "verdict": "severity_downgrade",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "prometheus_client が pyproject.toml の依存に含まれており CI parity.yml でもインストールされる環境では pytest.skip が実行されることは実質ない。finding 自体が顕在化しないと認めている。実害なし。",
+          "evidence": "CONFIRMED test_de403_feature_staleness_semantics.py:193-237 に 4 件の pytest.skip が残存。finding の留保: CI が prometheus_client インストール済み環境で実行される限り問題は顕在化しない。",
+          "counter_proposal": "severity を low に格下げ。try/except ImportError ガード削除は低コスト修正。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "real_finding_severity_low"
+    },
+    {
+      "finding_id": "QA-605",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [
+        "DM-508"
+      ],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "DM-508 との統合により unit.yml 分離で両方解決する。low 妥当。",
+          "evidence": "CONFIRMED parity.yml:107-113 で finding 記述通り単一ワークフロー兼務。parity.yml:95-106 に既知課題として記録済み。",
+          "counter_proposal": "low 維持。unit.yml 新設を next sprint 以降のタスクとして記録。DM-508 と fix PR 統合。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "QA-606",
+      "source_agent": "qa-tester",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "INC-2026-0527-001 (phantom exposure) の連鎖点として on_fill を指摘している点は正確。fill -> state_sync 経路の回帰テスト不足は繰り返し障害の根因でもある。medium は妥当。",
+          "evidence": "CONFIRMED test_signal_flow.py:280-317 で on_fill と StateStore.save_position の assert なし。test_atlas_top3_strategies.py:558-586 で fills_completed カウントのみ。MEMORY.md: INC-2026-0527-001。",
+          "counter_proposal": "medium 維持。spy/assert_called の追加は低コスト。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed"
+    },
+    {
+      "finding_id": "QA-607",
+      "source_agent": "qa-tester",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "tests/integration/ に test_main_runner_symmetry.py は存在しない (Grep で 0 件確認)。AUDIT-2026-0525-002 の教訓から継続する構造的リスク。QA-617 (_EXPECTED_INJECTED_MODULES ハードコード) と同一根因の複数症状。",
+          "evidence": "CONFIRMED tests/integration/ Grep で対称性メタテストが 0 件。test_dm204 と test_de101 は個別配線のみ検証。MEMORY.md AUDIT-2026-0525-002 の教訓記録。",
+          "counter_proposal": "medium 維持。QA-617 と統合 PR で test_main_runner_symmetry.py 新設 + AST 動的収集化を実装。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed"
+    },
+    {
+      "finding_id": "QA-608",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "AUDIT-2026-0529-003 C-01 で runner.py 側は修正済みと記録されているがテストでの保証はない。QA-607 と同一根因の別症状として統合 PR で対応可。low 妥当。",
+          "evidence": "finding 記述通り test_pa401_main_eventbus_startup_order.py は TradingPlatform (main.py) 向けのみ。UnifiedRunner 向けテストなし。",
+          "counter_proposal": "low 維持。QA-607 PR に統合。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "QA-609",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "DE-509 と同一ファイルの別問題 (fixture の index 型)。低コスト修正 (UTC DatetimeIndex 付与)。",
+          "evidence": "CONFIRMED parity_test.py:27-55 で RangeIndex 使用。conftest.py:252 の QT-308 修正との非対称。",
+          "counter_proposal": "low 維持。DE-509 修正 PR に同梱して fixture を一括改善。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "QA-610",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [
+        "QA-620"
+      ],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "tests/performance のテストが 30 秒を超えるかは環境依存。CI が安定しているなら緊急度は低い。QA-620 と統合。",
+          "evidence": "CONFIRMED parity.yml:113 で --ignore=tests/performance が含まれていない。pyproject.toml timeout=30 がデフォルト。",
+          "counter_proposal": "low 維持。--ignore=tests/performance 追加は低コスト修正。QA-620 と統合。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "QA-611",
+      "source_agent": "qa-tester",
+      "claimed_severity": "medium",
+      "verdict_severity": "low",
+      "verdict": "severity_downgrade",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "finding の前提 FTS が ATLAS の評価関数を import して評価を行う経路がある場合は未確認条件。forward_test.py が ATLAS 評価関数を直接呼ばないのであれば影響経路は存在せず FTS 側のテスト追加は不要。finding 自体も留保を付けている。未確認の影響経路に対して medium は過大評価。",
+          "evidence": "CONFIRMED FTS tests/ 配下に var_95, EFFECTIVE_WEIGHT_FLOOR, QA-201, QA-301 の参照 0 件。forward_test.py の ATLAS 依存度は未確認。finding recommendation に留保あり。",
+          "counter_proposal": "severity を low に格下げ。forward_test.py の ATLAS 依存度を確認してから severity 確定。",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "real_finding_severity_low_pending_confirmation"
+    },
+    {
+      "finding_id": "QA-612",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "テスト関数本体の型注釈省略は CLAUDE.md で許可されており conftest.py の型付き関数のみが対象。影響は限定的。low 妥当。",
+          "evidence": "finding 記述通り .pre-commit-config.yaml で files: ^trading_platform/ の制限により tests/ が対象外。",
+          "counter_proposal": "low 維持。conftest.py のみ対象に限定した mypy 追加でよい。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "QA-613",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "QA-609 と同一問題の別ファイル (RangeIndex)。低コスト修正。",
+          "evidence": "CONFIRMED test_strategy_contract.py:108-129 で RangeIndex 使用。xfail_scenario_signals.py:101 に bar.name = ts 設定が参考実装として存在。",
+          "counter_proposal": "low 維持。QA-609 修正 PR に統合。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "QA-614",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "pytest 8.x では session.exitstatus は書き込み可能な int 属性として確認されている。将来の read-only 化リスクは低確率。low 妥当。",
+          "evidence": "CONFIRMED conftest.py:443-445 で session.exitstatus = 2 の直接代入。pytest 8.x では書き込み可能な int 属性。",
+          "counter_proposal": "low 維持。pytest_runtest_makereport フック方式への移行は正しい方向だが緊急性なし。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "QA-615",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "DE-515 の PARITY_COVERED frozenset による検知機構はあるが FTS の CI は ATLAS 変更を検知できない。cross-repo trigger は repository_dispatch で実現可能。low 妥当。",
+          "evidence": "CONFIRMED parity.yml:7-17 で FTS リポジトリの変更のみをトリガーとする。ATLAS は別リポジトリ参照。",
+          "counter_proposal": "low 維持。ATLAS 側に repository_dispatch で FTS parity CI を trigger する仕組みを将来追加。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "QA-616",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "QA-618 (spread ハードコード) と同一根因の別ファイル。",
+          "evidence": "CONFIRMED test_atlas_top3_strategies.py:505-506 で USD_JPY ハードコード。test_worker_coordinator.py:163-164 に正しい実装が参照実装として存在。",
+          "counter_proposal": "low 維持。QA-618 と同一 PR で修正。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "QA-617",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "QA-607 と同一根因の別症状。AST 動的収集化は QA-607 の test_main_runner_symmetry.py 新設と同一アプローチ。統合 PR で対応すべき。",
+          "evidence": "CONFIRMED test_dm204_metrics_collector_production_wiring.py:34-42 で _EXPECTED_INJECTED_MODULES がハードコード。AST 動的収集なし。",
+          "counter_proposal": "low 維持。QA-607 と統合 PR で対応。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "QA-618",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "QA-616 と同一根因の別ファイル。low 妥当。",
+          "evidence": "CONFIRMED test_signal_flow.py:228 で spread=0.03 ハードコード。test_worker_coordinator.py:164-165 に動的 spread 設定が参照実装として存在。",
+          "counter_proposal": "low 維持。QA-616 と同一 PR で修正。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "QA-619",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "dedup_with": [],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "コメント行に pytest.skip を含むケースは実際には稀。CI での false positive 発生は低確率。",
+          "evidence": "CONFIRMED test_no_existence_skip.py:96-103 で stripped 行のコメント除外なし。技術的事実確認。",
+          "counter_proposal": "low 維持。stripped.startswith(number_sign) チェック追加は 1 行修正。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low"
+    },
+    {
+      "finding_id": "QA-620",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed_duplicate_of_QA-610",
+      "dedup_with": [
+        "QA-610"
+      ],
+      "adversarial_review": [
+        {
+          "type": "adversarial_check",
+          "criticism": "QA-610 と同一根因 (tests/performance が CI --ignore 外) の別側面。fix PR 統合。",
+          "evidence": "CONFIRMED parity.yml:113 で tests/performance が --ignore に含まれていない。QA-610 と同一箇所を指摘。",
+          "counter_proposal": "low 維持。QA-610 と統合。--ignore=tests/performance 追加で両方解決。",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed_low_duplicate_of_QA-610"
+    }
+  ],
+  "summary": {
+    "total_findings_reviewed": 41,
+    "severity_upgrades": [
+      {
+        "id": "DM-506",
+        "from": "low",
+        "to": "medium",
+        "reason": "DM-501 修正後も独立して存在する gap。M-O2 (PR50) の監視目的が本番で達成されていない独立問題。INC-2026-0527-001 連鎖障害の早期発見に寄与。"
+      }
+    ],
+    "severity_downgrades": [
+      {
+        "id": "DE-501",
+        "from": "high",
+        "to": "medium",
+        "reason": "alerting_rules.yml に ADVISORY として明文化済み。per-TF slicing は primary_tf ラベルで代替可能。Parity/資金への直接影響なし。"
+      },
+      {
+        "id": "DE-502",
+        "from": "critical",
+        "to": "high",
+        "reason": "DE-304 self-acknowledge 済みの known-deferred 問題。M15+60s 通常運用では発生せず backlog 発生時のみ影響。"
+      },
+      {
+        "id": "DE-503",
+        "from": "high",
+        "to": "medium",
+        "reason": "main.py は dev/staging 経路のみ。UnifiedRunner 本番経路は OANDAStreamReceiver 非使用。"
+      },
+      {
+        "id": "DE-504",
+        "from": "high",
+        "to": "medium",
+        "reason": "DE-503 と同一根拠。main.py 非本番経路。"
+      },
+      {
+        "id": "DE-505",
+        "from": "high",
+        "to": "medium",
+        "reason": "observability 劣化のみ。取引判断・資金管理への直接影響なし。"
+      },
+      {
+        "id": "DE-510",
+        "from": "medium",
+        "to": "low",
+        "reason": "weight=0.05 単独では quality_score 閾値 0.70 を下回らない。DE-506 アラート化前は実害なし。"
+      },
+      {
+        "id": "DE-512",
+        "from": "medium",
+        "to": "low",
+        "reason": "DE-311 既知 deferred。UnifiedRunner 本番経路は StateStore 非依存。"
+      },
+      {
+        "id": "QA-604",
+        "from": "medium",
+        "to": "low",
+        "reason": "prometheus_client インストール済み CI 環境では skip 未発火。実害なし。"
+      },
+      {
+        "id": "QA-611",
+        "from": "medium",
+        "to": "low",
+        "reason": "FTS の ATLAS 評価関数依存経路が未確認。未確認の影響経路に対して medium は過大評価。"
+      }
+    ],
+    "rejected_findings": [
+      {
+        "id": "DM-509",
+        "reason": "前提誤り。health_check.py:212 で degraded は unhealthy として外部返却される。is_healthy も False を返す。finding の核心的主張 (degraded で /health が healthy を返し続ける) は実コードと矛盾する。"
+      }
+    ],
+    "duplicate_findings": [
+      {
+        "id": "DE-505",
+        "canonical": "DE-501",
+        "note": "同一修正経路 (LiveFeatureStore strategy_id 注入)"
+      },
+      {
+        "id": "DM-508",
+        "canonical": "QA-605",
+        "note": "parity.yml 単一ワークフロー問題の別側面"
+      },
+      {
+        "id": "QA-620",
+        "canonical": "QA-610",
+        "note": "tests/performance CI 除外問題の重複指摘"
+      }
+    ],
+    "must_fix_items": [
+      {
+        "id": "DE-502",
+        "rationale": "backlog 発生時の EWM ドリフト。DE-304 の deferred 状態が長期化。中間バー drop 計測カウンタ fx_poll_backlog_dropped_total 追加を同梱すること。"
+      },
+      {
+        "id": "DM-501",
+        "rationale": "FxStalePnlTransientSkipHigh アラートが本番で永久 dead。修正コスト低 (StrategySlot.__init__ に metrics 引数追加 + runner.py 生成箇所への metrics=self._metrics 追加)。"
+      },
+      {
+        "id": "DM-507",
+        "rationale": "CLAUDE.md ポリシー違反 (個人メールアドレスのコードベースへのコミット)。修正コスト極低。"
+      },
+      {
+        "id": "QA-601",
+        "rationale": "CSR-101 RCE 回帰テスト。ast.Call パターンと ast.Name のみパターンの 2 種を parametrize に追加して実際の検出結果を実証。ast.Name パターンが未検出であれば loader.py の ast.Name チェックに __import__ を追加する修正を行う。"
+      }
+    ],
+    "recommended_pr_consolidations": [
+      {
+        "pr_name": "fix/de503-504-main-backfill-wiring",
+        "findings": [
+          "DE-503",
+          "DE-504"
+        ],
+        "description": "main.py の OANDAStreamReceiver と CandleFetcher の backfill 引数を一括修正"
+      },
+      {
+        "pr_name": "fix/de501-505-feature-store-strategy-id-label",
+        "findings": [
+          "DE-501",
+          "DE-505"
+        ],
+        "description": "LiveFeatureStore コンストラクタに strategy_id 注入。staleness と buffer_at_cap の両ラベルを修正"
+      },
+      {
+        "pr_name": "fix/dm501-506-strategy-slot-metrics",
+        "findings": [
+          "DM-501",
+          "DM-506"
+        ],
+        "description": "StrategySlot に metrics 注入 + strategy_slot.py に _last_signal_at / set_signal_silence_sec を追加"
+      },
+      {
+        "pr_name": "fix/qa607-617-main-runner-symmetry-test",
+        "findings": [
+          "QA-607",
+          "QA-617",
+          "QA-608"
+        ],
+        "description": "test_main_runner_symmetry.py 新設 + _EXPECTED_INJECTED_MODULES の AST 動的収集化"
+      },
+      {
+        "pr_name": "fix/qa605-dm508-unit-yml-split",
+        "findings": [
+          "QA-605",
+          "DM-508"
+        ],
+        "description": "unit.yml を新設して parity / unit / fault ワークフローを分離"
+      },
+      {
+        "pr_name": "fix/qa610-620-performance-ci-ignore",
+        "findings": [
+          "QA-610",
+          "QA-620"
+        ],
+        "description": "parity.yml に --ignore=tests/performance を追加"
+      },
+      {
+        "pr_name": "fix/qa616-618-test-instrument-hardcode",
+        "findings": [
+          "QA-616",
+          "QA-618"
+        ],
+        "description": "E2E テストの instrument / spread ハードコード値を動的設定に変更"
+      },
+      {
+        "pr_name": "fix/qa609-613-fixture-datetimeindex",
+        "findings": [
+          "QA-609",
+          "QA-613"
+        ],
+        "description": "Parity テストと契約テストの fixture に UTC tz-aware DatetimeIndex を付与"
+      }
+    ]
+  }
+}

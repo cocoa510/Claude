@@ -1,0 +1,240 @@
+{
+  "audit_id": "AUDIT-2026-0531-001",
+  "agent": "risk-execution-engineer",
+  "mode": "dry-run / investigate-only",
+  "repo": "C:/data/works/FX/fx_trading_system",
+  "commit": "fca45f23",
+  "audit_summary": "PTRC / Execution Engine / KillSwitch / StateStore / OANDABroker を精査。前回監査 RE-401/402/411 の修正は本番経路 (UnifiedRunner) に取り込まれている (OANDABroker.metrics 注入済 / entry_rollback の orphan close + RiskAlert 実装済 / submit_order 外側 except の Prometheus 計装 fix 済) ことを確認。critical 未修正なし。一方で本番 UnifiedRunner 経路に複数の dead-path / 設計乖離が残存: (i) PostTradeRiskControl は UnifiedRunner で未配線で kill_switch.force_activate 連鎖が一切走らない (main.py のみで生存) — Level 3 複合トリガ KS が事実上 dead、(ii) circuit_breaker.py::CircuitBreaker (Class) と同 KillSwitch (Class) クラス系は UnifiedRunner で未生成 — GlobalRiskSupervisor 内蔵 CB のみで動作 (cooldown 自動復帰機構と manual_reset は本番で dead)、(iii) LatencyMonitor は本番 UnifiedRunner で完全未配線で Latency 観測は本番で恒久 0、(iv) RetryManager は H-EXEC-4 で本番未配線確定だが KillSwitch.register_components 経由でも UnifiedRunner では呼ばれない (main.py のみ)。さらに観測した運用上の懸念: (a) HARD_LIMITS.kill_switch_daily_loss が 0.05 (A フェーズ保守値) のまま放置で 'A フェーズ完了で 0.15 に戻す' TODO が現在の体制で誰の責任か不明、(b) 5/30 audit log で 24h 内に KS が同条件 (daily_realized_pnl_total=-11000 JPY) で 2 回発動しており、KS が永続化されない契約 (REV-1) のためプロセス再起動だけで黙って再発動可能な状態が継続している、(c) 5/30 の PTRC 拒否は GBP_USD で `1トレードリスク 73-81%` という異常値 (account_balance=1,000,000 = main.py 既定の 1M を持つ二重ランナー疑い) を観測しており main.py と UnifiedRunner の二重起動 / 二重実装が本番で実際に発生している兆候を確認、(d) `_check_per_pair_exposure` が方向 (LONG/SHORT) を無視して absolute 合算しているため LONG hedge の SHORT で per-pair 上限早期到達のリスクあり、(e) PaperBroker が OANDA account_info を参照しない (PaperBroker 独自残高 1M を持つ) ため Paper StrategySlot 経路が PTRC の account_balance を誤った値で評価する可能性 — ただし UnifiedRunner では OANDA account_info を全 slot に渡すため Paper でも live 残高で評価されており影響限定。Live 注文の実観測: 本日 (2026-05-31 Sun) は FX 市場閉鎖窓 (Sat-Sun) のため 0 signals / 0 orders は仕様通り。EUR_JPY trade_id=333 が 16 回連続で position_reconcile_mismatch (divergence=B / 全 22 LIVE strategy_id のいずれの comment にもマッチしない) を 16 分間隔で発出し続けており、手動建玉または別タグの孤児 trade が放置されていることを確認 — 自動 close は CLAUDE.md 規約により禁止だが、長期放置で WARN メール疲労が発生し本来の異常検知が埋もれる二次リスクあり。RE-001 系の本番固定為替: OandaCurrencyConverter が起動時 _seed_fx_cross_rates と poll_latest 経路で USD_JPY 等を seed しており fallback=None で構築されているため、現状の Live 戦略 (EUR_USD 1 件 / 残り JPY-quote) は固定レート退行なし。",
+  "findings": [
+    {
+      "id": "RE-501",
+      "severity": "high",
+      "category": "wiring_dead_path",
+      "title": "PostTradeRiskControl が UnifiedRunner で未配線 — Level 3 複合トリガ → KillSwitch.force_activate 経路が本番で dead",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/unified_runner/runner.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/unified_runner/strategy_slot.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/risk_engine/ptrc_post.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/main.py"
+        ],
+        "details": "main.py:886-936 では PostTradeRiskControl をインスタンス化し ExecutionCoordinator に注入し、coordinator.py:568-627 の _run_post_trade_risk で fill 後に evaluate_fill → action.action_type=='kill_switch' → kill_switch.force_activate() を発火する経路が確立されている。一方 UnifiedRunner 経路 (runner.py + strategy_slot.py) は PostTradeRiskControl を一度もインスタンス化せず、StrategySlot._handle_entry_after_signal / _handle_exit_inner も PTRC-Post 評価を一切呼ばない。結果: Level 3 複合トリガ (daily_loss_100pct / slippage_and_loss_critical / exposure_and_loss_critical / slippage_and_exposure_critical) による KillSwitch 連鎖発動は UnifiedRunner で永久に発火しない。本番唯一の KS 発動経路は GlobalRiskSupervisor._evaluate_kill_switch (= 確定損失 daily_realized_pnl_total <= -10000 JPY) のみで、異常スリッページ / exposure 超過 + loss 接近の複合悪化を捕捉できない。`grep -n 'ptrc_post\\|PostTrade' core/unified_runner/{runner,strategy_slot}.py` は 0 件。"
+      },
+      "impact": "Hard Limit 防壁の多層性が実質単層化。確定損失 10K JPY 到達前に exposure × slippage が同時悪化した状況で KS が遅延発動し損失拡大を許す可能性。",
+      "recommendation": "UnifiedRunner で PostTradeRiskControl をインスタンス化し、StrategySlot._handle_entry_after_signal 完了直後 (record_fill 後) に evaluate_fill → action_type=='kill_switch' なら risk_supervisor 経由で KS 強制発動 (GlobalRiskSupervisor は force_activate を持たないため _activate_kill_switch(reason=...) の公開 API 追加が必要)。代替として PTRC-Post の Level 3 ロジックを GlobalRiskSupervisor.record_close 内に組み込み多層化する。",
+      "reproduction": "1) UnifiedRunner で abnormal slippage (>=5 pips) + remaining_ratio<=0.1 の fill を発生させる (合成 fill event)。2) GlobalRiskSupervisor.account_state.is_kill_switch_active は False のまま継続する。3) main.py 経路では同条件で kill_switch_activated イベント発火するが UnifiedRunner では発火しない (アサーション)。"
+    },
+    {
+      "id": "RE-502",
+      "severity": "medium",
+      "category": "dead_code_in_production",
+      "title": "circuit_breaker.py::CircuitBreaker / KillSwitch クラスが UnifiedRunner で未配線 — cooldown 自動復帰 + manual_reset/manual_reset_async が本番経路で dead",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/risk_engine/circuit_breaker.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/unified_runner/runner.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/main.py"
+        ],
+        "details": "main.py:893-908 では CircuitBreaker(event_bus, risk_state) と KillSwitch(event_bus, risk_state, balance_provider, state_store, audit_logger) を生成し _kill_switch.register_components(...) で broker_gateway/order_manager/retry_manager を接続。これに対し runner.py には `CircuitBreaker(` / `KillSwitch(` のインスタンス化が **一切存在しない** (`grep -n 'CircuitBreaker(\\|KillSwitch(' runner.py` は 0 件)。本番 LIVE は GlobalRiskSupervisor のみで CB/KS を扱う設計だが、circuit_breaker.py の以下の機能が UnifiedRunner で dead: (a) CircuitBreaker._on_fill による realized_pnl<0 連続検出と CIRCUIT_BREAKER_COOLDOWN_SEC=300 秒後の自動復帰、(b) KillSwitch.manual_reset_async (FastAPI endpoint reset_kill_switch で expose)、(c) KillSwitch.force_activate (PTRC-Post 連鎖発動の唯一の入口)、(d) KillSwitch._inflight_at_kill による KS 発動時の broker_cancel_states ({SUBMITTED, ACKNOWLEDGED}) 在中注文の OANDA REST cancel_order 発火 (FTS-RX-R9-002)。UnifiedRunner の _cancel_all_open_orders は CREATED/RISK_CHECK/QUEUED 段だけでなく active_orders 全体を gateway.cancel に流すため (d) は別経路で代替可能だが、コードパス重複により挙動乖離 (例: cancel_target_id の broker_order_id 優先ロジックの再実装漏れ) を生む構造的負債。"
+      },
+      "impact": "CB の自動復帰は GlobalRiskSupervisor 側で is_suspended を解除する経路がないため、UnifiedRunner では一度 suspended になった戦略はプロセス再起動か daily_reset まで復帰しない (main.py より厳格)。KS の manual_reset_async API endpoint は UnifiedRunner プロセスでは呼んでも no-op (self._kill_switch is None)。",
+      "recommendation": "現状の二重実装を解消するため、circuit_breaker.py の CircuitBreaker / KillSwitch クラスを UnifiedRunner で使わない契約を docs/runbook に明文化するか、GlobalRiskSupervisor に CB cooldown 自動復帰オプション + 明示 force_activate(reason) API を追加して main.py 経路と機能等価性を担保する。並行して KillSwitch.manual_reset_async が UnifiedRunner で機能しない旨を FastAPI endpoint のレスポンスで明示する (silent no-op 防止)。"
+    },
+    {
+      "id": "RE-503",
+      "severity": "medium",
+      "category": "observability_dead_path",
+      "title": "LatencyMonitor が UnifiedRunner で完全未配線 — 本番 Live 注文の send→fill latency が観測不能",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/execution_engine/latency_monitor.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/unified_runner/runner.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/unified_runner/strategy_slot.py"
+        ],
+        "details": "`grep -n 'latency_monitor\\|LatencyMonitor' core/unified_runner/{runner,strategy_slot}.py` は 0 件。ExecutionCoordinator は main.py 経路でのみ LatencyMonitor を保持し _on_signal → start_timing / end_timing を呼ぶが、UnifiedRunner::StrategySlot._handle_entry_after_signal は OrderSubmissionGuard.submit_with_guard を直接呼び latency 計測経路が存在しない。本番 Live 経路は UnifiedRunner のため、latency_warning_count / critical_count / p95_ms 等の統計は本番で恒久 0 となる。OANDA 5xx / API 障害時の体感劣化を運用者が観測できない死角。"
+      },
+      "impact": "OANDA 接続劣化や retry-by-backoff のレイテンシ膨張を可視化できない。Prometheus 計装は OANDABroker._record_api_metric の `observe_oanda_api_latency` で部分的に拾えるが、これは個別 HTTP 呼び出しの latency であり、注文 lifecycle 全体 (PTRC + Guard + Broker) の e2e latency ではない。",
+      "recommendation": "StrategySlot._handle_entry_after_signal で OrderSubmissionGuard 呼び出し前後に LatencyMonitor.start_timing / end_timing を挿入し、UnifiedRunner レベルでシングルトン LatencyMonitor を共有する。または ExecutionCoordinator を UnifiedRunner にも統合し二重実装を解消する。"
+    },
+    {
+      "id": "RE-504",
+      "severity": "medium",
+      "category": "wiring_dead_path",
+      "title": "RetryManager が UnifiedRunner で未配線 — KillSwitch.register_components(retry_manager=...) も呼ばれず stop barrier が本番で dead",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/execution_engine/retry_manager.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/unified_runner/runner.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/main.py"
+        ],
+        "details": "retry_manager.py:6-26 で 'H-EXEC-4 (PR10): 現在 submit_with_retry() は本番 LIVE 経路では呼ばれていない' と明示。main.py:944 で kill_switch.register_components(retry_manager=self._retry_manager) を呼ぶが、UnifiedRunner は KillSwitch クラスを使わず GlobalRiskSupervisor のみで動作するため RetryManager は本番で完全に未配線。OANDA 5xx / timeout の再送は BrokerGateway.submit_with_limited_retry (PR37, retry_enabled=False が既定) のみで担われる。"
+      },
+      "impact": "本番 LIVE で API 一時障害時の自動再送がほぼ無効化されている (retry_enabled=False)。OANDA submit_order timeout 時の挙動は OrderSubmissionGuard.submit_with_guard → BrokerGateway.submit_with_limited_retry → submit (max_attempts=1 相当) → 失敗を REJECTED 遷移、で確定。Live 注文が失敗時に自動再試行されないため、運用者の手動再送 or 次バー再エントリーに依存。",
+      "recommendation": "(a) retry_manager.py の 'dead code' note を `本番未配線 — UnifiedRunner では BrokerGateway.submit_with_limited_retry を retry_enabled=True で使うこと` に更新、または (b) UnifiedRunner で BrokerGateway を retry_enabled=True で生成し OANDA 5xx の bounded retry を有効化する。冪等性は clientExtensions.id (= order.order_id) で OANDA 側 duplicate detect が担保。retry_enabled=True 化は 'change:spec' のため要承認。"
+    },
+    {
+      "id": "RE-505",
+      "severity": "high",
+      "category": "duplicate_runner_risk",
+      "title": "audit log の PTRC reject に account_balance=1,000,000 が混在 — main.py と UnifiedRunner の二重起動兆候",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/logs/audit/audit_2026-05-30.jsonl",
+          "C:/data/works/FX/fx_trading_system/trading_platform/main.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/execution_engine/coordinator.py"
+        ],
+        "details": "logs/audit/audit_2026-05-30.jsonl で ATLAS-2026-0424-001 (paper 戦略) の GBP_USD 注文が `1トレードリスク 73.77-81.46%` で REJECT されており、reject 文中の portfolio.account_balance = 1,000,000 JPY が観測される (具体的には '必要証拠金 4523988 JPY が 利用可能証拠金 1000000 を超過' の 1000000)。一方 UnifiedRunner の OANDA Live 残高は ~298,389 JPY (PSF 0526 セッション)。account_balance=1,000,000 は main.py の `account_balance: float = 1_000_000.0` (main.py:156 / coordinator.py:62) または PaperBroker の initial_balance=1_000_000.0 と一致。UnifiedRunner は account_info を全 slot (paper 含む) に OANDA balance ~298k で渡すため、UnifiedRunner 単独経路では 1M は出現しない。0424-001 は logs/unified_state で paper モード確定。よって audit log の PTRC reject は main.py 経路 (FastAPI) が同時起動して同一 audit log 出力先 (logs/audit/audit_YYYY-MM-DD.jsonl) に書いている可能性が極めて高い。"
+      },
+      "impact": "本番運用で 2 つの取引プロセス (main.py + UnifiedRunner) が同一 OANDA account に発注しうる重大なリスク。OANDA 側で clientExtensions.id (order_id) が偶発的に衝突しない限り重複約定し、PTRC は独立した RiskState/account_balance で評価するため双方とも 8x exposure 上限まで発注可能。RE-505 (DM-005 系の延長) として CRITICAL に分類すべき。",
+      "recommendation": "(a) ps / process list で main.py と run_unified.py の同時稼働を即確認 (今回は dry-run なので未実施)、(b) main.py の PA-103 escape hatch (PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1) が誤って有効化されていないかを env / unit ファイル / systemd で確認、(c) audit log writer (JsonlAuditWriter) に PID + process_name フィールドを必須化し二重起動を構造的に検知、(d) lockfile (logs/unified_runner.pid と equivalent for main.py) を共有し起動時に互いを排他する。"
+    },
+    {
+      "id": "RE-506",
+      "severity": "medium",
+      "category": "stale_alert_fatigue",
+      "title": "EUR_JPY trade_id=333 の position_reconcile_mismatch が 16 回連続発火 (本日のみ) — 手動建玉 / 別タグ孤児 trade が放置で alert fatigue 進行",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/logs/unified_runner.20260531.stderr.log",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/unified_runner/runner.py"
+        ],
+        "details": "本日 (2026-05-31 10:30〜14:50 UTC) の stderr log で `divergence='B', unmatched_trade_ids=['333'], instruments=['EUR_JPY']` の position_reconcile_mismatch warning が 16 回連続発出 (約 16 分間隔 = POSITION_RECONCILE_INTERVAL_SEC のチェック周期に対応)。EmailNotifier は position_reconcile_mismatch を購読しているため 16 通メール送信されている可能性 (throttle 設定次第)。当該 trade_id=333 は EUR_JPY だが全 22 LIVE strategy (0504-060 等) の clientExtensions.comment と一致せず、手動建玉または旧 imported 戦略の残骸が確定。runner.py:1213-1238 の発出ロジックは divergence='B' をリセットせず、同じ unmatched trade が存在する限り 16 分間隔で永久発火する設計。"
+      },
+      "impact": "alert fatigue で本来検知すべき新規異常 (例: position_reconcile_mismatch divergence='A' で stale 保持) が運用者に埋もれる。EmailNotifier の throttle が AUDIT-2026-0528 の修正で 6h 化された場合は warning 頻度は減少しているが、structlog WARN ログは毎回出続けるため log noise → 重要メッセージの埋没。",
+      "recommendation": "(a) `position_reconcile_mismatch divergence=B` に対し EmailNotifier 側で `(alert_type, unmatched_trade_ids_hash)` 単位の throttle を追加 (12h / 24h)、(b) runner.py で unmatched trade_ids の前回スナップショットを保持し変化があったときのみ alert を発出 (新規 manual trade 追加 / 既存削除 / 別 instrument 化を検知)、(c) 当該 trade_id=333 の素性確認手順を docs/runbook に追加して運用者が即対応できるようにする。"
+    },
+    {
+      "id": "RE-507",
+      "severity": "medium",
+      "category": "hard_limit_drift",
+      "title": "HARD_LIMITS.kill_switch_daily_loss = 0.05 が 'A フェーズ保守値' のまま残置 — 'PR6.5 で 0.15 に戻す' 計画が未実行",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/models/risk.py"
+        ],
+        "details": "models/risk.py:204-207: 'PR0.5 (2026-05-22): A フェーズ (Hard Limit 防壁配線中) の保守値として 0.15 → 0.05 に引き下げ。A フェーズ完了 (PR6.5) で 0.15 に戻す。' とのコメントがあるが、現時点 (2026-05-31) で 0.05 のまま。AccountInfo.balance=298,389 JPY の口座では 5% = 14,919 JPY が KS 残高比率閾値、GlobalRiskSupervisor._MAX_ALLOWED_TOTAL_DAILY_LOSS_JPY=-10,000 JPY の絶対閾値 (こちらが先に効く) が両方混在。'A フェーズ完了' の判定主体 / PR6.5 のトリガが docs/runbook に存在しないため値が技術的負債として残存する構造リスク。"
+      },
+      "impact": "0.05 は実運用で `_MAX_ALLOWED_TOTAL_DAILY_LOSS_JPY=-10000` が先に効くため挙動への直接影響は限定的だが、口座残高が 200,000 JPY を下回ると 0.05 比率閾値が先に効くようになり KS 発動条件が突然変化する。documented 'PR6.5' の計画が遅延していることで現実の Hard Limit 値とコメントが乖離。",
+      "recommendation": "(a) PR6.5 の責任者・期限・完了条件を docs/architecture/ に記載、(b) A フェーズ完了基準 (具体的に何を満たせば 0.15 に戻すのか) を明文化、(c) 即時対応として 0.05 のままで運用継続するなら 'A フェーズ完了' の表記を 'Active production value (REV-1+)' に変更し計画的引き上げ意図を撤回するかいずれかを選択。"
+    },
+    {
+      "id": "RE-508",
+      "severity": "medium",
+      "category": "ks_persistence_design",
+      "title": "Kill Switch 24h 内 2 回発動 (2026-05-30) で REV-1 'プロセス再起動で解除' 契約が形骸化 — 永続化なし契約の運用ルールが空回り",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/logs/audit/audit_2026-05-30.jsonl",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/unified_runner/risk_supervisor.py"
+        ],
+        "details": "audit_2026-05-30.jsonl で 02:49:32 と 07:48:05 の 2 回、いずれも `reason='daily_realized_loss_exceeded', daily_realized_pnl_total=-11000.0, limit_jpy=-10000.0` で KS 発動を記録。REV-1 設計 (risk_supervisor.py:1004-1013) は 'KS 解除手段はプロセス再起動のみ' を契約とし永続化しない設計だが、実際には 5 時間以内に同じ理由で再発動しており、プロセス再起動 → 当日の daily_realized_pnl 再計算が `realized_pnl=-11000` のまま (account_state.daily_realized_pnl_total は永続化されていないが、各 StrategyState.daily_realized_pnl_jpy が state.json に永続化されており、_sync_risk_state_from_slot 経路で復元される) → 起動直後の record_close 不要で建玉している分は daily_pnl_total に積まれないが、再起動後に新規 fill が来た瞬間に supervisor._evaluate_kill_switch で再判定 → 即 KS 発動という連鎖の可能性。runner.py の _restore_last_reset_date と GlobalRiskSupervisor の状態リセット周りに微妙な不整合がある可能性。"
+      },
+      "impact": "運用者が KS 発動を起動し直すことで '解除した' つもりでも、次の fill で同じ理由で即発動 → 無限ループになる。Runbook (docs/runbook/kill_switch_triggered.md) で 'daily_reset 後に再起動' を強制する明示手順が欠落していると同じ事故が継続。",
+      "recommendation": "(a) UnifiedRunner.start() で起動時に `account_state.daily_realized_pnl_total` を全 StrategyState.daily_realized_pnl_jpy から再構築する経路があれば、その合算値が `_MAX_ALLOWED_TOTAL_DAILY_LOSS_JPY` を下回っている場合に CRITICAL ログ + EmailNotifier alert + 自動 daily_reset の有無を運用者に強制確認させる、(b) docs/runbook/kill_switch_triggered.md に 'daily_realized_pnl_jpy が閾値超過のまま再起動すると即 KS 再発動する' という明示警告と回復手順を追記、(c) GlobalRiskSupervisor.daily_reset を時刻ベースでなく明示 API 経由 (運用者の意思表明) で起動し KS 解除と daily_reset を同一トランザクションで実行する設計に変更。"
+    },
+    {
+      "id": "RE-509",
+      "severity": "medium",
+      "category": "ptrc_per_pair_exposure",
+      "title": "PTRC `_check_per_pair_exposure` が方向 (LONG/SHORT) を無視して absolute 合算 — hedge ポジションで上限早期到達リスク",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/risk_engine/ptrc.py"
+        ],
+        "details": "ptrc.py:783-812 `_check_per_pair_exposure` は `sum(vp.quantity for vp in portfolio.virtual_positions if vp.instrument == order.instrument)` で同一 instrument の全 quantity を方向に関わらず合算。LONG 10,000 + 新規 SHORT 10,000 が 20,000 として評価され `HARD_LIMITS.max_exposure_per_pair=500,000` に対し本来は net=0 のはずが過大評価される。GlobalRiskSupervisor.total_exposure も同様に方向無視で合算するが、こちらは設計意図的 (Hedging モデルで gross exposure を制限) なので一貫している。"
+      },
+      "impact": "JPY downtrend 期に同一 instrument の LONG/SHORT で hedge する戦略構成 (BAL 戦略マトリクス) で per-pair 上限に早期到達し新規エントリーが REJECT される可能性。現状の Live 戦略マトリクスは方向集中 (LONG 21 / SHORT 1) のため実害は出ていないが、将来 SHORT 戦略追加時に潜在化。",
+      "recommendation": "(a) net exposure = `LONG_qty - SHORT_qty` の絶対値で評価する net モードと、現行の gross モードを HARD_LIMITS で選択可能にする、(b) または gross 維持の意図を明文化 (Hedging 口座での fat-finger 防止) し、max_exposure_per_pair を SHORT 戦略追加時に引き上げる方針を docs に記載。現状は OANDA Hedging account なので gross 評価が安全側で妥当だが、設計意図のドキュメント化が必要。"
+    },
+    {
+      "id": "RE-510",
+      "severity": "low",
+      "category": "deferred_cleanup",
+      "title": "LatencyMonitor._pending dict が end_timing 未到達時に leak — main.py で REJECTED → end_timing 呼び忘れ経路の検証",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/execution_engine/latency_monitor.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/execution_engine/coordinator.py"
+        ],
+        "details": "latency_monitor.py:73-90 で start_timing は _pending[order_id] にタイムスタンプを格納し、end_timing でのみ pop される。coordinator.py:394 で start_timing → 401 / 421 / 442 で end_timing が呼ばれているように見えるが、PTRC REJECTED 経路 (coordinator.py:339-359) は start_timing より前なので問題なし。一方、broker_gateway.submit が例外を投げて FillResult を返さないケース (例: BrokerUnavailableError) は OrderSubmissionGuard.submit_with_guard 内で吸収され `success=False` で返るため end_timing が呼ばれない可能性。`if not fill_result.success` 経路 (coordinator.py:420-441) では end_timing が確実に呼ばれているため OK。ただし将来 PR で example_decorator 等で early-return パスが追加されると leak の可能性が残る。"
+      },
+      "impact": "long-running 本番プロセスで _pending dict に order_id が堆積し続けてメモリリーク。現状は LatencyMonitor が UnifiedRunner で未配線 (RE-503) のため本番では発火しない。main.py 経路では coordinator.py 中の end_timing が網羅されており実害なし。",
+      "recommendation": "(a) LatencyMonitor に TTL 付き _pending evict を追加 (Order_Manager と同様の pattern)、または (b) coordinator.py 全 early-return path に start_timing/end_timing pair を確実に通すコメントを追加。RE-503 を解消する際に同時対応推奨。"
+    },
+    {
+      "id": "RE-511",
+      "severity": "medium",
+      "category": "kill_switch_state_inflight",
+      "title": "GlobalRiskSupervisor._activate_kill_switch の `_cancel_open_orders` 失敗時の inflight_unrecovered 追跡が main.py 系 KillSwitch._inflight_at_kill と非対称",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/risk_engine/circuit_breaker.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/unified_runner/risk_supervisor.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/unified_runner/runner.py"
+        ],
+        "details": "circuit_breaker.py::KillSwitch._activate (line 386-516) は inflight_unrecovered (cancel 失敗した broker 内 order_id) を `self._inflight_at_kill` に保持し、position_reconciler の照合で人間判断にエスカレートする経路を提供。一方 UnifiedRunner.runner.py:1424-1492 `_cancel_all_open_orders` は failed 数を logger.info に出すのみで、どの order_id が cancel 失敗したかを supervisor 側に persist せず、後続の position_reconciler との連動も未配線。KS 発動時のキャンセル失敗 in-flight 注文の存在が次サイクルで自動再検知される保証なし (broker 側で約定が進行する可能性)。"
+      },
+      "impact": "本番 LIVE で KS 発動時に OANDA cancel_order が一部失敗した場合、その注文は約定継続 → ポジション増加 → KS 発動意図に反する建玉拡大。発見は次の position_reconciler 照合 (1h 周期) まで遅延する可能性。",
+      "recommendation": "GlobalRiskSupervisor に `inflight_unrecovered: list[str]` を追加し、runner._cancel_all_open_orders で `gateway.cancel(...) == False` の order_id を蓄積して supervisor へ渡す。supervisor._cancel_open_orders_best_effort の except 内でこれを `self._inflight_unrecovered` に格納し、position_reconciler._reconcile_live_positions で参照して divergence='A' (stale_slots) に加えて 'C' (kill_switch_cancel_failed) として明示分類する。"
+    },
+    {
+      "id": "RE-512",
+      "severity": "medium",
+      "category": "snapshot_writer_failure_visibility",
+      "title": "OrderSubmissionGuard の Snapshot 永続化失敗時 REJECT は Audit Log に直接記録されない — fail-closed 拒否の追跡が difficult",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/execution_engine/order_submission_guard.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/execution_engine/coordinator.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/unified_runner/strategy_slot.py"
+        ],
+        "details": "order_submission_guard.py:94-107 で SnapshotPersistenceError → success=False / error_message=REJECT_REASON_SNAPSHOT_FAILURE を返し、metric `inc_snapshot_persistence_failure()` を加算。Coordinator (coordinator.py:398-418) は OrderState.REJECTED に遷移し OrderEvent(RISK_REJECTED) を publish するが、PTRC.fire_ptrc_audit 経路は通らず Audit Log には 'ptrc_rejected' エントリが残らない。StrategySlot 経路 (strategy_slot.py:680-690) も同様で Audit Log エントリなし。結果として 'snapshot 永続化失敗で発注が失われた' という事実が AuditLogger (JsonlAuditWriter) に記録されず、後日の調査で snapshot fault と PTRC reject を区別困難。"
+      },
+      "impact": "fail-closed REJECT の証跡欠落。Prometheus metric `fx_snapshot_persistence_failures` での集計は可能だが、具体の order_id / strategy_id / 失敗時の market context との突合が Audit Log で取れない。",
+      "recommendation": "(a) OrderSubmissionGuard.submit_with_guard 失敗時に `_audit_logger.record(AuditEntry(category=PTRC_DECISION, action='snapshot_persistence_failure', details={order_id, strategy_id, error}))` を発火、(b) または Coordinator / StrategySlot の REJECT 経路で `_fire_ptrc_audit` を呼ぶ際に reject_reason='snapshot_persistence_failure' を含めて記録する。"
+    },
+    {
+      "id": "RE-513",
+      "severity": "low",
+      "category": "ks_persistence_drift",
+      "title": "RE-001 系の旧仕様 (KS 永続化) と REV-1 (再起動で解除) のコメント矛盾が circuit_breaker.py に残留",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/risk_engine/circuit_breaker.py"
+        ],
+        "details": "circuit_breaker.py:415-436 で 'PR4/REV-1 (2026-05-22): 旧 RE-001 / FTS-RX-R2-012 は SIGKILL 後の再起動で KS=True を残すため AccountRiskState を永続化していたが、REV-1 で「KS 解除は人間判断による再起動のみ」契約を採用したため is_kill_switch_active は永続化しない方針に変更（save_account_risk_state 側でも除外されているが、ここでは PnL/exposure のスナップショット維持の目的で呼び続ける）' とコメントしつつ、その直下で `await self._state_store.save_account_risk_state(snapshot)` と `await self._state_store.save_risk_state(self._risk_state)` を呼んでいる。save 側で除外されていれば期待動作だが、save_risk_state の RiskState には is_kill_switch_active=True が含まれており、StateStore 実装側で除外していなければ復元時に KS=True が残る可能性。"
+      },
+      "impact": "REV-1 契約が StateStore 実装側 (redis_store.py / postgres_store.py) で正しく実装されているかをコード上から保証できない。新規 StateStore 実装が追加された場合に 'KS フィールドを除外する' 契約を破る潜在リスク。",
+      "recommendation": "(a) StateStore.save_risk_state / save_account_risk_state のシグネチャに `exclude_fields: set[str] = frozenset({'is_kill_switch_active'})` を必須引数化し、契約を呼び出し側ではなく型システムで強制、(b) または circuit_breaker.py:425-434 で snapshot に渡す前に `RiskState.model_copy(update={'is_kill_switch_active': False})` を明示的に作り渡す (二重防衛)。"
+    },
+    {
+      "id": "RE-514",
+      "severity": "low",
+      "category": "broker_gateway_idempotency",
+      "title": "BrokerGateway._attempts dict が長期稼働で leak — Client Order ID 単位の試行回数追跡に TTL なし",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/execution_engine/broker_gateway.py"
+        ],
+        "details": "broker_gateway.py:155-160 で `self._attempts: dict[str, int]` を `_next_attempt` で order_id ごとにインクリメントするが、終端状態 (FILLED/REJECTED/CANCELLED) の order_id が _attempts から除去される経路が一切ない。長期稼働 (週単位以上) で _attempts が単調増加し、シングルプロセス内のメモリ使用量が線形に膨張する可能性。OrderManager._cleanup_terminal_orders は max=500 で evict されるが BrokerGateway._attempts は無制限。"
+      },
+      "impact": "1 日 100 注文 × 30 日 = 3,000 エントリ × ~50B/entry = 150KB レベルなので絶対量は小さいが、ATLAS 戦略マトリクス完成時の 162 戦略 × 高頻度 fill で年単位稼働すれば数百 MB に膨らみうる。Prometheus でも観測されないため発見遅延。",
+      "recommendation": "BrokerGateway.submit 末尾で order.state in TERMINAL_STATES なら `self._attempts.pop(order.order_id, None)` を呼ぶ。または `OrderedDict` + LRU evict (Order_Manager._cleanup_terminal_orders と同 pattern)。"
+    },
+    {
+      "id": "RE-515",
+      "severity": "info",
+      "category": "currency_converter_cold_start",
+      "title": "OandaCurrencyConverter の起動直後 cold-start ウィンドウで非 JPY-quote ペアの注文が PTRC fail-safe REJECT される観測ウィンドウあり",
+      "evidence": {
+        "files": [
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/unified_runner/runner.py",
+          "C:/data/works/FX/fx_trading_system/trading_platform/core/risk_engine/ptrc.py"
+        ],
+        "details": "runner.py:685-686 で `_compute_fx_cross_instruments()` → `_seed_fx_cross_rates()` を warmup 後・ポジション復元前に同期実行する設計だが、`_seed_fx_cross_rates` の OANDA candle 取得が一時失敗 (network 瞬断 / rate limit) した場合は WARN ログのみで継続し、currency_converter キャッシュは空のまま。直後の poll_cycle で新規 fill が来ても update_from_instrument は実際の bar 到着まで起こらないため、その間 EUR_USD 等の非 JPY-quote 注文は PTRC._unsafe_static_in_live=False なので fail-safe ガードは効かないが、currency_converter.convert は None を返し PTRC._check_max_risk_per_trade / _check_total_exposure / _check_margin が `fx_rate_unavailable` で REJECT する。RiskAlertEvent が発出されるため可視化は OK。"
+      },
+      "impact": "Sunday 起動直後 (~5 分) の市場再オープン時に EUR_USD 戦略のエントリーが REJECT される可能性。実際には EUR_USD 戦略は 0511-059 の 1 件のみで H1 bar (= 60 分待機) なので、初回 H1 bar 到着時には少なくとも 1 回 poll_latest が走り update_from_instrument が動いているため実害なし。M15 / M1 戦略を将来追加する場合は cold-start ウィンドウが短くなり影響が顕在化する可能性。",
+      "recommendation": "(a) _seed_fx_cross_rates 失敗時に retry (3 回 backoff) を実装、(b) startup 完了判定に 'cross_rates_seeded = True' フラグを必須化し、未シード時は新規 fill 処理をブロック (BrokerGateway.halt() 等で) する fail-closed mode を追加。"
+    }
+  ]
+}

@@ -1,0 +1,90 @@
+{
+  "auditor": "quant-analyst",
+  "audit_id": "AUDIT-2026-0531-001",
+  "repo": "C:\\data\\works\\FX\\ATLAS",
+  "head_sha": "74888095",
+  "mode": "investigate-only",
+  "audit_summary": "QA-301 v6.2.0 FLOOR 0.90 と QA-201 v6.1.0 per-bar 指標フル equity 化 の double change で評価層全体に複数の整合性ホールが残存している。最重要は QA-301 backfill が duplicate_check.is_duplicate を過去の状態のままで再評価しないため、FLOOR 厳格化で代表戦略が FAIL に転落した後もその下のクラスタ占有戦略は cluster_cap_exceeded で固定される構造 (QA-601 high)。次に QA-302 既知欠陥 _compute_oos_is_ratio が is_profit_factor_walks=None 時にフル期間 PF にフォールバックする経路が QA-301 と部分相殺し、ドキュメント上は再キャリブレーションが必要とされたまま未対処 (QA-602 high)。第三に FLOOR 0.90 への厳格化が balanced/short_only 戦略を非対称に不利化する構造的バイアスを生んでいる (balanced WFA None 率 74.0%/Drift None 率 72.6%、short_only 56.5%/47.8%、long_only 22.0%/20.9%、QA-603 high)。第四に backfill 経路では soft_score が unrounded float のまま保存され runner.py のリアル経路 (round 4) と精度差を生む (QA-604 medium)。第五に 既存 847 件の no_trade 戦略が QA-201/QA-301 双方で skip され metrics_schema_version=6.1.0 のまま固定化され、cross-generation 比較で 56% が schema 不一致状態 (QA-605 medium)。L1/L2 drift 警告閾値 (QA-606)、weakness_detector の -0.45 var_95 閾値の境界キャリブレーション (QA-607)、Tier1 backfill 内 or 結合の hybrid 旧フォーマット fallthrough (QA-608)、Soft Score ラベルのハードコード閾値 (QA-609)、L1/L2 drift の非対称解釈 (QA-610) も併記する。",
+  "findings": [
+    {
+      "id": "QA-601",
+      "severity": "high",
+      "title": "QA-301 backfill が duplicate_check.is_duplicate を再評価せず cluster cap 占有が古い状態で固定化",
+      "evidence": "scripts/backfill_v6_2_0_soft_score.py:170-172 は duplicate_check = result.get(\"duplicate_check\") or {} で result.json の既存 is_duplicate を読み new_overall_passed に AND で組み込むが、QA-301 で代表戦略が FAIL に転落しても、その下のクラスタ占有戦略の is_duplicate=True は再評価されない。実測: ATLAS-2026-0506-026 (Tier1 PASS / Tier2 PASS soft_score=0.7375 / overall_passed=False / failed_conditions=[cluster_cap_exceeded]) が現存。",
+      "impact": "QA-301 で 15 件が flip した結果、(a) 代表が消えたクラスタの 4 件目以降は誤って duplicate 扱いのまま残り本来 Gate PASS 昇格すべき戦略が見落とされる、(b) 逆に Tier2 PASS なのに cluster_cap_exceeded で FAIL される 1 件 (0506-026) が cluster ランキングから消えるためクラスタ代表が再選定されず FTS 投入候補から脱落する。cluster_strategies() による再ランキングが backfill フローに含まれていない。",
+      "recommendation": "QA-301 backfill 完了後に dedup.cluster_strategies() で全クラスタを再評価し、is_duplicate=True が新しい cluster 状況下で誤りとなる戦略を発見した場合は overall_passed を再計算する手順 (手順 6.5) を追加。または backfill スクリプト末尾で is_duplicate のみを refresh する別パスを実装する。"
+    },
+    {
+      "id": "QA-602",
+      "severity": "high",
+      "title": "QA-302 (oos_is_pf_ratio フル期間 PF フォールバック) が既知欠陥として未対処、QA-301 と部分相殺",
+      "evidence": "atlas/backtest/result_parser.py:240-263 _compute_oos_is_ratio は l2.is_profit_factor_walks is None のとき is_pf = l2.profit_factor (フル期間 IS+OOS 結合 PF) にフォールバック。atlas/backtest/runner.py:680-682 docstring は QA-302 (oos_is_pf_ratio フル期間 PF フォールバック) は逆方向のバイアスで QA-301 と部分相殺の関係にあるため本変更と組合せて再キャリブレーションが必要 と明記しつつ修正されていない。",
+      "impact": "WFA walks 不足 (<10) で is_profit_factor_walks=None になった戦略は自己相関で膨張した IS PF (= フル期間 PF) を分母とする ratio 計算により Tier2 OOS/IS Ratio component が系統的にバイアスされる。特に短期 H4 戦略・SHORT 戦略 (WFA walks<10 になりやすい) で発生。QA-301 で FLOOR を引き上げた結果、QA-302 の上向きバイアスが部分的に相殺されることになり評価の正確性が劣化する。",
+      "recommendation": "(1) is_profit_factor_walks=None の時は OOS/IS PF Ratio を None として扱い Tier2 components で 該当 weight を None 按分の対象にする。(2) または QA-302 fix を専用 [change:spec] エントリで実施しフル期間 PF フォールバックを撤去する。(3) docs/spec_change_log.md に QA-302 開放状態を明示し QA-301 と並列追跡する。"
+    },
+    {
+      "id": "QA-603",
+      "severity": "high",
+      "title": "QA-301 FLOOR 0.90 が balanced/short_only 戦略を非対称に不利化、SHORT 戦略不足問題を悪化",
+      "evidence": "QA-301 backfill 後の Tier2 component None 率実測 (strategies/ 配下 sweep): balanced (n=73) WFA None 74.0% / Drift None 72.6%、short_only (n=46) WFA None 56.5% / Drift None 47.8% に対し long_only (n=440) はそれぞれ 22.0% / 20.9% のみ。FLOOR=0.90 の構造的影響として valid_weight=0.60 (WFA+Drift+Top3+OOS 全 None) で max soft_score=0.667 < 0.70 で必ず FAIL する。WFA+Drift+Top3 None で valid_weight=0.72 / max soft_score=0.80 とギリギリ。",
+      "impact": "memory/MEMORY.md に記録のショート戦略不足問題 (project_short_strategy_deficit) が QA-301 で更に深刻化。FTS 35 戦略稼働中の方向集中リスクが拡大する。balanced/SHORT は WFA walks 確保のため期間延長 (DEFAULT_BACKTEST_YEARS=3 から 4-5) するか None 按分を direction_bias 別に閾値分離 (LONG: 0.90、SHORT/balanced: 0.80) する余地あり。",
+      "recommendation": "QA-301 6 手順の検証 (前後比較) で direction_bias 別の PASS/FAIL 反転件数を集計し balanced/SHORT のみ FAIL に倒れた件数を docs/spec_change_log.md に追記。必要なら direction_bias 別 FLOOR を [change:tuning] で導入する。少なくとも logs/backfill_v6_2_0_soft_score.json::flipped に direction_bias を併記。"
+    },
+    {
+      "id": "QA-604",
+      "severity": "medium",
+      "title": "backfill 経路と runner 経路で soft_score の保存精度が不一致 (unrounded vs round(4))",
+      "evidence": "atlas/backtest/runner.py:1077 は gate_check[soft_score] を round(soft_score, 4) で保存。一方 scripts/backfill_v6_2_0_soft_score.py:194,196 は tier2[soft_score] = new_soft / gate_check[soft_score] = new_soft を unrounded で保存。実測 ATLAS-2026-0506-026 で gate_check.soft_score = 0.7375398888888891 (16 桁 unrounded)。",
+      "impact": "新規 BT 結果と backfill 結果で soft_score の表示精度が異なり cross-strategy 比較で round-off による誤判定が発生しうる。例: ある世代 soft_score=0.6999 (round 4) と別世代 soft_score=0.69995 (unrounded) を閾値比較すると挙動が異なる。FLOOR=0.90 影響戦略の境界域で過去結果の再現性が劣化する。",
+      "recommendation": "backfill_v6_2_0_soft_score.py に round(new_soft, 4) を導入。または Tier2Result.model_validate({soft_score: new_soft, ...}) で Pydantic 経由の正規化を強制。ゴールデンテスト (tests/golden/test_qa301_soft_score_floor.py) で backfill 経路の rounded 値もアサート。"
+    },
+    {
+      "id": "QA-605",
+      "severity": "medium",
+      "title": "no_trade 戦略 847 件が QA-201/QA-301 backfill で skip されたまま metrics_schema_version=6.1.0 で固定化、cross-generation 比較で schema_version_warning が頻発",
+      "evidence": "logs/backfill_v6_1_0_risk_metrics.json::status_counts.skip_no_trades=847、logs/backfill_v6_2_0_soft_score.json は skip_no_tier2/skip_no_components 経路で同じ戦略群を skip する。実測 strategies/ 配下: metrics_schema_version=6.1.0 が 846 件、6.2.0 が 607 件、合計 1453 件。no_trade 戦略の 99.9% が 6.1.0 で固定。",
+      "impact": "metrics_schema_version 不一致は 56% (846/1453) の戦略で発生。evaluate で親比 X% 改善を算出する際 quant-analyst の指示 (schema 不一致時は warning 必須) は formally 守られていても no_trade 戦略 (= L1 FAIL 含む全数) を含む集計 (例: cluster_cap_exceeded 判定の dedup プロセス) で混在する。CLAUDE.md L283 が定義する backfill 規律に違反 (drift 残存 0 を確認するが 56% 規模で破られている)。",
+      "recommendation": "backfill スクリプトに no_trade 戦略でも metrics_schema_version は新 schema に更新する分岐を追加。l2.total_trades==0 の戦略は計算対象の指標が存在しないため Gate 判定への影響はなく schema 更新のみで安全。または schema_drift audit (scripts/audit_schema_drift.py) を集計から no_trade を構造的に除外し drift 残存 0 の定義を再定式化する。"
+    },
+    {
+      "id": "QA-606",
+      "severity": "medium",
+      "title": "GATE_MAX_L1_L2_DRIFT (0.30/0.35) が SHORT 戦略のみ緩和されているが Layer 1 vectorbt と Layer 2 event-driven の構造的差を全戦略で見るには不十分",
+      "evidence": "atlas/config/defaults.py:163-167 GATE_MAX_L1_L2_DRIFT=0.30 / GATE_MAX_L1_L2_DRIFT_SHORT=0.35 (v5.5.0 で SHORT のみ +0.05 緩和)。atlas/backtest/runner.py:1463 は警告ログのみで Gate 判定への影響はないが改善ループの誤誘導源になる。実測の drift threshold 違反件数は集計されていない (logs/ に専用 audit なし)。",
+      "impact": "(a) v6.2.0 で QA-301 が FLOOR を厳格化した今 Tier2 component の None 按分が L1 と L2 の指標差を増幅させる。L1 vectorbt は spread fixed / slippage fixed で評価、L2 event-driven は time-of-day 倍率付き — この差は通貨ペア・時間足で系統的に偏る (M15 SHORT は時間帯偏在で drift 拡大)。(b) drift > 0.35 戦略の改善方向は L1 過信が主因のため fx-strategist 向け feedback が必要だが現状は単発 warning のみで improvement_directive に反映されない。",
+      "recommendation": "(1) drift_threshold 違反戦略を logs/audit/l1_l2_drift_violations.json に蓄積し世代分布を可視化。(2) drift > threshold 戦略は evaluation/weakness.json の forbidden_patterns に L1 過信パターンとして自動追加 (weakness_detector.py 拡張)。(3) 通貨ペア・時間足・direction_bias 三軸で drift threshold を再キャリブレーション、または時間足別フロアを設定。"
+    },
+    {
+      "id": "QA-607",
+      "severity": "medium",
+      "title": "weakness_detector var_95 閾値 -0.45 が QA-201 (per-bar 単位) のフル equity 値分布で 6.61% 発火、p05=-0.4689 で実装上のキャリブレーションマージンが薄い",
+      "evidence": "atlas/analyzer/weakness_detector.py:153 if m.var_95 < -0.45 (QA-201 で 0.5 から 0.45 に再キャリブレーション)。logs/backfill_v6_1_0_risk_metrics.json::new_var_95_distribution.p05=-0.4689 — 閾値 -0.45 のすぐ近辺に分布 5% 点が存在し わずかな計算誤差・新規戦略の var_95 揺らぎで発火率が大きく変動する。実測: -0.45 で 6.61% (40/605) 発火 / -0.50 で 2.15% (13/605)。",
+      "impact": "var_95 の単位は per-bar (H1=1h, M15=15min) で timeframe 依存。閾値 -0.45 は H1/M15/H4 混在分布の中央値 -0.09 / p05 -0.47 を基準としているが M15 戦略 (15min 単位) は同じ年率 VaR でも 4 倍小さい数値 (= 4 倍大きい絶対値) になりうる。timeframe 横断で同一閾値を適用するのは設計バグの可能性。",
+      "recommendation": "(1) timeframe 別 var_95 分布を計測 (M15/H1/H4/D1) し timeframe-aware 閾値を導入。(2) または var_95 を sqrt-of-time でスケーリングして日次 VaR に正規化してから -1.0% 等の単位独立閾値を適用。(3) docs/spec_change_log.md に var_95 単位の timeframe 依存性を明記し cross-timeframe 比較禁止を documenting。"
+    },
+    {
+      "id": "QA-608",
+      "severity": "low",
+      "title": "QA-301 backfill の Tier1 passed 判定で or 結合により旧フォーマット (passed=True / all_passed=False) の異常状態を誤って PASS 扱いする経路",
+      "evidence": "scripts/backfill_v6_2_0_soft_score.py:169 tier1_passed = bool(tier1_dict.get(all_passed) or tier1_dict.get(passed))。Pydantic v2 では all_passed が canonical で passed フィールドは Tier1Result に存在しないが、旧 result.json (< 5.0.0) や test fixtures で passed=True のみ持つレコードが混在しうる。bool(False or True) = True で誤判定。",
+      "impact": "現存戦略 1453 件中で all_passed=False / passed=True の組み合わせを持つ result.json は実測 0 件 (sweep で確認可)。実害は小さいが test fixture や手動編集 result.json で hybrid 状態が混入したときの規律違反検知が効かない。本件は混在参照リスクの一例。",
+      "recommendation": "(1) tier1_passed = bool(tier1_dict.get(all_passed, False)) に変更 (canonical 単独参照)。または (2) tier1_dict のいずれにも all_passed/passed キーが無い場合は明示エラーで停止 (backfill 異常検知)。"
+    },
+    {
+      "id": "QA-609",
+      "severity": "low",
+      "title": "failed_conditions の Soft Score (< 0.70) ラベルが GATE_TIER2_SOFT_SCORE_MIN を hard-coded format で文字列化、閾値変更時に silent 不整合",
+      "evidence": "atlas/backtest/runner.py:1062 failed_labels.append(f Soft Score (< {GATE_TIER2_SOFT_SCORE_MIN:.2f}) )。値そのものは defaults 経由なので追従するが、文字列マッチで failed_conditions を判定する下流 (例: evaluation/weakness.json のフォーマット解析、FTS dashboard ラベル) が古い 0.70 を埋め込んだままになりうる。実測 286 件の strategy で Soft Score (< 0.70) marker を保持。",
+      "impact": "GATE_TIER2_SOFT_SCORE_MIN を将来 0.75 に変更した場合、新規戦略は Soft Score (< 0.75) を生成するが過去 backfill 済み戦略は (< 0.70) のまま残る (backfill では failed_conditions の文言は書き換わらない)。FTS dashboard / 集計スクリプトでラベルベース集計に頼ると Soft Score 接頭辞のみで wildcard matching が必要になりコード品質劣化。",
+      "recommendation": "(1) failed_conditions のマーカーを構造化 ({code: soft_score_below_threshold, threshold: 0.70, soft_score: 0.65}) に変更。(2) または閾値値を文言から除去し (Soft Score のみ)、別途 metadata に保存。"
+    },
+    {
+      "id": "QA-610",
+      "severity": "low",
+      "title": "L1/L2 drift 計算 abs(l1-l2)/max(l1,l2) が L1>L2 (悪化) と L1<L2 (改善) を同じスコアで警告、改善方向の信号情報を捨てている",
+      "evidence": "atlas/backtest/runner.py:1450-1452 denom = max(l1_pf, l2_pf); l1_l2_drift = abs(l1_pf - l2_pf) / denom。実装上は対称形だが L1=2.0/L2=0.5 (L2 で大きく悪化、過剰最適化シグナル) と L1=0.5/L2=2.0 (L1 で過小評価、L2 で改善) を区別せず両方 drift=0.75 とする。実害は警告ログのみのため小さい。",
+      "impact": "evaluation/report.json で戦略の品質を分析する quant-analyst エージェントが drift 値だけ見て過剰最適化と誤判定するリスク。実態は L1 vectorbt と L2 event-driven の構造差が双方向にあるが weakness_detector.py:_check_overfitting は drift>0.5 のみ判定。L2 で改善している drift は改善傾向の証だが現状はこれを weakness と扱いうる。",
+      "recommendation": "drift と並行して l1_l2_signed_drift = (l2_pf - l1_pf) / max(l1_pf, l2_pf) (符号付き) を保存。weakness_detector は negative signed drift (= L1 過大評価) のみ overfitting flag、positive は L1 過小評価として informational に留める。"
+    }
+  ]
+}

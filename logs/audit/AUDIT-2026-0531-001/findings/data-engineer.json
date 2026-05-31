@@ -1,0 +1,228 @@
+{
+  "audit_id": "AUDIT-2026-0531-001",
+  "auditor": "data-engineer",
+  "repo": "fx_trading_system",
+  "commit": "fca45f23",
+  "phase": "Phase 1 - investigate-only",
+  "audit_summary": "FTS データ層 (Live FeatureStore / Market Data Pipeline / Data Quality / State Store / Parity) を fca45f23 時点で精査し、DE-403 / DE-404 / DE-101 / DE-002 など直近 post_fix_defect 修正の効きを確認した。前回修正の中核 (observe_feature_staleness の semantics 修正 / staleness ≈ 0 在中 / UnifiedRunner への DQE 注入 / forced-publish + RiskAlert 経路) は本番経路で機能している。ただし、(a) `observe_feature_staleness` の `strategy_id` ラベルに依然として TF 名 (`self.primary_tf`) を渡しており Prometheus メトリクス上は二重ラベル (strategy_id=H1, primary_tf=H1) として記録される ADVISORY 既知課題 (DE-503 自身が認知済み) が dashboard 利用者に対する semantics 誤読の温床になっている、(b) production 経路 `SharedDataProvider.poll_latest` が複数バー backlog 時に末尾 1 本のみ下流配信する DE-304 known issue が依然 dead path (LiveFeatureStore のバー列に gap → EWM 系 (EMA/RSI/ATR/ADX/MACD adjust=False) で永続 Parity ドリフトする構造課題)、(c) `main.py` の `OANDAStreamReceiver` 構築箇所が `backfill_fn` / `last_bar_time_fn` / `backfill_timeframes` を 1 つも注入しておらず FTS-DATA-005 再接続バックフィルが silent dead、(d) `main.py:805` の CandleFetcher 構築で `state_store=` を注入していないため FTS-DATA-009 再起動 backfill 起点永続化が dead、(e) `feature_store_buffer_at_cap` gauge の primary_tf ラベル設計が複数 LiveFeatureStore インスタンス間で gauge を相互上書きする (最後の registration が値を握る)、(f) DE-002 forced-publish カウンタに対する Prometheus アラートが alerting_rules.yml に存在せず、Parity 破綻の sentinel が runbook + RiskAlert 経由でしか可視化されていない、などの構造的死角を検出した。1 件 critical / 4 件 high / 7 件 medium / 4 件 low の計 16 finding を提示する。",
+  "findings": [
+    {
+      "id": "DE-501",
+      "severity": "high",
+      "category": "metrics_semantics",
+      "title": "observe_feature_staleness の strategy_id 引数に TF 名を渡し続けている (DE-403 修正の incomplete)",
+      "location": "trading_platform/data/feature_store/live_store.py:449-453 / trading_platform/core/monitoring/metrics.py:873-910",
+      "description": "DE-403 (AUDIT-2026-0530-001, commit eccab9a) で staleness の age semantics は修正されたが、ラベル設計上の根本問題 (`strategy_id` ラベルに strategy ID が入らない) は **後送り** されている。`live_store.py:449-453` は `self._metrics.observe_feature_staleness(self.primary_tf, staleness_sec, primary_tf=self.primary_tf)` と呼び出しており、Prometheus gauge 上は `fx_feature_staleness_sec{strategy_id=\"H1\", primary_tf=\"H1\"}` のように両ラベルとも TF 名で埋まる。`alerting_rules.yml:193-196` には『strategy_id ラベルには現状 TF 名が入ります (DE-403 Phase 4.5 既知課題)。戦略別スライシングには primary_tf ラベルを使用してください』と明記されており、observability 設計上は self-acknowledged だが、(1) Grafana / runbook 利用者は `strategy_id` ラベルを per-strategy slicing に使えると思い込みやすく、TF 名で集約された値を strategy 値として誤読するリスクがある、(2) LiveFeatureStore は構造的に 1 戦略 = 1 LiveFeatureStore なので strategy_id を保持する設計的余地はある (StrategySlot 経由で strategy_id を Constructor 注入できる)、(3) MetricsCollector の in-process dict は `feature_staleness_{strategy_id}_{primary_tf}` というキーで管理されるため、`feature_staleness_H1_H1` のように TF 名で衝突する形のキーが本番で量産される。短期的には alerting_rules.yml のアノテーション継続でカバー可、恒久対応として LiveFeatureStore.__init__ に `strategy_id: str | None = None` を追加し、UnifiedRunner._build_slot で実 strategy_id を注入する案を推奨。",
+      "evidence": [
+        "live_store.py:449-453 (第1引数 = self.primary_tf)",
+        "alerting_rules.yml:193-196 (DE-503 ADVISORY 明文化)",
+        "metrics.py:893-902 (docstring に既知課題注記)"
+      ],
+      "recommendation": "LiveFeatureStore コンストラクタに `strategy_id: str | None = None` 引数を追加し、UnifiedRunner._build_slot で実際の strategy_id (例: 'ATLAS-2026-0508-069') を注入する。`update_bar` の observe_feature_staleness 呼出は `self._strategy_id or self.primary_tf` を第1引数に渡す。後方互換のため、引数省略時は primary_tf を fallback として継続。"
+    },
+    {
+      "id": "DE-502",
+      "severity": "critical",
+      "category": "data_loss_parity",
+      "title": "SharedDataProvider.poll_latest が backlog バーの中間を silent drop し LiveFeatureStore に gap 列を作る",
+      "location": "trading_platform/core/unified_runner/data_provider.py:251 / runner.py:1772-1810",
+      "description": "DE-304 (commit 9998a7a) で `_calc_poll_count` が dynamic 化され OANDA 側からの取得本数は backlog をカバーできるようになったが、`poll_latest` 自体は依然 `latest = OandaCandle.model_validate(raw_candles[-1])` (data_provider.py:251) で **末尾 1 本のみ** を返す。runner.py:1783 でこれを StrategySlot.on_bar に流すため、poll_interval (既定 60 秒) より多くのバーが OANDA 側で確定していた場合、中間バーは production 経路で完全に silent drop する。影響:\n  1. LiveFeatureStore のバー列が ATLAS BT (連続バー前提) と乖離し、EWM 系インジケータ (EMA / RSI / ATR / ADX / MACD; adjust=False) は drop 後の継続バーで初期値ドリフトが発生する → 永続 Parity 破壊。1e-10 許容を超え 1e-4 オーダー以上の差を産む可能性あり。\n  2. シグナル発火条件 (例: Donchian breakout) の決定ロジックが ATLAS BT と乖離。\n  3. drop 自体を計数するメトリクスがない (DE-303 連続失敗カウンタは異なる事象を計測)。\n  4. data_provider.py:48 のコメントは『最終バーのみを on_bar に流す既存挙動を維持 (StrategySlot 側の状態保証ロジック変更を伴うため別タスク)』と self-acknowledge しているが、別タスクが具体化されたチケットも commit も見当たらない。\n発生条件:\n  - M15 strategy + poll_interval=60s の通常運用では事故らないが、network jitter / プロセス再起動 (15-30 分) / OANDA 連続失敗からの復旧時に backlog が発生し、LiveFeatureStore のバッファと ATLAS BT の連続性が乖離する。\n  - 過去 (2026-05-20 〜 26) の連続再起動インシデント (project_live_zero_orders) では本問題が補助的要因の可能性。",
+      "evidence": [
+        "data_provider.py:247-260 (latest = raw_candles[-1] のみ)",
+        "data_provider.py:40-51 (DE-304 self-acknowledge コメント)",
+        "runner.py:1772-1810 (single bar feed)"
+      ],
+      "recommendation": "poll_latest の戻り値を `OandaCandle | None` から `list[OandaCandle]` に変更し、_last_bar_time より後の全バーを返すよう `_emit_unprocessed_bars` を追加する。StrategySlot.on_bar は単一バー前提だが、UnifiedRunner 側で list を順次 await することで対応可。中間 backlog drop の発生回数を `fx_poll_backlog_dropped_total{instrument,timeframe}` カウンタで計装し、Grafana で可視化する。"
+    },
+    {
+      "id": "DE-503",
+      "severity": "high",
+      "category": "dead_wiring",
+      "title": "main.py の OANDAStreamReceiver 構築が backfill_fn / last_bar_time_fn / backfill_timeframes を一切渡しておらず FTS-DATA-005 再接続 backfill が silent dead",
+      "location": "trading_platform/main.py:977-987 / forward_test.py:204-210",
+      "description": "OANDAStreamReceiver は再接続成功時に `_run_backfill(reason='reconnect')` を呼ぶが、`backfill_fn` / `last_bar_time_fn` / `backfill_timeframes` のいずれかが未設定だと _run_backfill は冒頭で `return` する (stream_receiver.py:418-423)。`main.py:977` の構築コードはこれらを 1 つも渡していないため、main.py 経路でストリーム切断→再接続が発生してもバックフィルは silent skip され、ストリーム断中に確定したバーは LiveFeatureStore に永久に届かない (DE-502 と同じ Parity ドリフト経路)。`forward_test.py:204` も同様。\n\nUnifiedRunner (本番) は OANDAStreamReceiver を使わず SharedDataProvider polling で代替しているため、UnifiedRunner 経路では本問題の影響範囲外。しかし `main.py` は dev/staging FastAPI 経路として依然動作可能であり、テスト・検証中の staging 環境では再接続後の EWM 系インジケータが ATLAS BT と乖離する。\n\n再現:\n```\n# main.py:977-987\nself._stream_receiver = OANDAStreamReceiver(\n    api_key=...,\n    account_id=...,\n    stream_url=...,\n    instruments=instruments,\n    event_bus=self._event_bus,\n    quality_engine=self._tick_quality_engine,\n    # ← backfill_fn / last_bar_time_fn / backfill_timeframes が **未指定**\n)\n```\n再接続時に `_run_backfill` の `if self._backfill_fn is None: return` で即離脱。",
+      "evidence": [
+        "main.py:977-987 (backfill 系引数欠落)",
+        "stream_receiver.py:418-423 (backfill_fn None で early return)",
+        "forward_test.py:204-210 (同様)"
+      ],
+      "recommendation": "main.py で CandleFetcher が同時生成される場合は `backfill_fn=self._candle_fetcher.backfill_missing` / `last_bar_time_fn=self._get_last_bar_time` / `backfill_timeframes=timeframes` を OANDAStreamReceiver に渡す。`_get_last_bar_time` は CandleFetcher の `_last_emitted` か StateStore.load_last_bar_time から導出。staging 環境で再接続バックフィルが ATLAS BT 連続性を保つかを統合テストで担保する。"
+    },
+    {
+      "id": "DE-504",
+      "severity": "high",
+      "category": "dead_wiring",
+      "title": "main.py:805 CandleFetcher 構築が state_store を注入しておらず FTS-DATA-009 再起動 backfill 起点永続化が dead",
+      "location": "trading_platform/main.py:805-814",
+      "description": "`CandleFetcher.__init__` は `state_store: Any = None` を受け取り、`_emit_candle` (candle_fetcher.py:314-325) で確定バー emit のたびに `state_store.save_last_bar_time` を呼ぶ。これにより FTS-DATA-009 (再起動後の初回接続で永続化済みの last_bar_time から backfill 再開) が機能する設計。\n\nしかし main.py:805 の構築箇所は state_store を一切渡していないため、本番ライフサイクルで CandleFetcher が確定バー時刻を永続化することがなく、プロセス再起動後に OANDAStreamReceiver._run_initial_backfill が StateStore.load_last_bar_time を読んでも常に None を返し、warmup_bars (既定 300 本) のみで初期化される。結果として:\n  - 再起動中に確定したバーが LiveFeatureStore に届かず、ATLAS BT との連続性が崩れる (DE-502 と同型の Parity ドリフト)。\n  - 起動直後の signal が ATLAS BT と異なる features 上で発火する可能性。\n\nUnifiedRunner 経路 (本番) は CandleFetcher を一切使わない (SharedDataProvider 経由) ため、UnifiedRunner では本問題の影響は別形 (DE-502) に集約されるが、main.py 経路自体は依然存在し staging / dev で fail する。",
+      "evidence": [
+        "main.py:805-814 (state_store 引数なし)",
+        "candle_fetcher.py:314-325 (save_last_bar_time 呼出)",
+        "stream_receiver.py:506-538 (initial backfill 経路)"
+      ],
+      "recommendation": "main.py で `state_store=self._state_store` を CandleFetcher コンストラクタに追加。StateStore が InMemoryBackend ベースでも dev/staging では十分機能する。永続化された last_bar_time が backfill 起点として読まれる経路を統合テスト (test_de504_*) で担保。"
+    },
+    {
+      "id": "DE-505",
+      "severity": "high",
+      "category": "metrics_semantics",
+      "title": "fx_feature_store_buffer_at_cap gauge が複数 LiveFeatureStore (=複数戦略) 間で primary_tf ラベル衝突し相互上書き",
+      "location": "trading_platform/data/feature_store/live_store.py:505-508 / trading_platform/core/monitoring/metrics.py:510-527",
+      "description": "M-D2 (PR48) で導入された `set_feature_store_buffer_at_cap(primary_tf, at_cap)` は単一の Prometheus gauge `fx_feature_store_buffer_at_cap{primary_tf=...}` をラベル `primary_tf` のみで識別する。本番では 1 戦略 = 1 LiveFeatureStore かつ多くの戦略が同じ primary_tf (例: 22 戦略中 14 戦略が H1) を使用しているため、各戦略の `_recalculate_effective_buffer_size` 呼出が **同じ Prometheus 系列を上書き** する。\n\n具体的な症状:\n  - 戦略 A (period_max=400, at_cap=False) の register 後、gauge=0\n  - 戦略 B (period_max=1000, at_cap=True) の register 後、gauge=1 (同じ primary_tf=H1 ラベル)\n  - 戦略 A が再度 register (動的 register は稀だが、warmup 後 re-register シナリオ等) すると gauge=0 に戻る → 戦略 B の cap 状況が永久に観測不能になる。\n\n本来は per-strategy gauge ラベルが必要 (DE-501 と同根)。`alerting_rules.yml` に該当 alert は無いが、運用 dashboard で『どの戦略のバッファが上限張り付きか』を判別不可。",
+      "evidence": [
+        "live_store.py:505-508",
+        "metrics.py:510-527 (primary_tf のみラベル化)",
+        "metrics.py:347-354 (gauge 定義 docstring の DE-503 注記と同根)"
+      ],
+      "recommendation": "set_feature_store_buffer_at_cap に strategy_id ラベルを追加 (DE-501 と同じ修正経路)。代替案: register 時に at_cap 単発 counter `inc_feature_store_buffer_capped_total{strategy_id, primary_tf}` を追加し、cap 到達を累積イベントとして記録する。"
+    },
+    {
+      "id": "DE-506",
+      "severity": "high",
+      "category": "observability_gap",
+      "title": "fx_data_quality_forced_publish_total に対する Prometheus アラートが alerting_rules.yml に存在せず、Parity 破綻 sentinel が runbook + RiskAlert のみで可視化",
+      "location": "deploy/prometheus/alerting_rules.yml (全体) / metrics.py:760",
+      "description": "DE-002 設計では「確定バーが品質 FAIL でも drop せず publish 継続 (Parity 維持)、forced_publish カウンタ + CRITICAL RiskAlertEvent で可視化」とする。`inc_data_quality_forced_publish(source, reason)` カウンタは bar_builder / candle_fetcher / shared_data_provider の 3 経路で更新されるが、`alerting_rules.yml` 全体を grep しても `fx_data_quality_forced_publish` を expr に含むアラートは存在しない。\n\n影響:\n  - 確定バー品質 FAIL は『異常事象 = 原因調査が必要』とコメントで明記されているが、Prometheus / Grafana 側で発火しない。`fx_data_quality_reject_total` の alert (alerting_rules.yml:86) は tick 側 reject のみを対象とし、bar 側 forced_publish はカバーしない。\n  - RiskAlertEvent → EmailNotifier 経路は live_anomaly kind に集約され 900s throttle されるため、同一バーの並列発火で多くがミュートされる可能性。\n  - DE-002 の運用契約 (forced_publish は調査要事象) と alerting 体制が乖離している。\n\n再現:\n```\ngrep 'fx_data_quality_forced' deploy/prometheus/alerting_rules.yml\n→ ヒットなし\n```",
+      "evidence": [
+        "alerting_rules.yml (全体に fx_data_quality_forced への参照なし)",
+        "metrics.py:760-790 (counter 定義は存在)",
+        "bar_builder.py:243-258 / candle_fetcher.py:285-309 / data_provider.py:418-434 (3 経路で increment)"
+      ],
+      "recommendation": "alerting_rules.yml に以下を追加:\n```yaml\n- alert: FxDataQualityForcedPublishHigh\n  expr: increase(fx_data_quality_forced_publish_total[10m]) > 0\n  for: 0m\n  labels:\n    severity: critical\n    team: data-engineer\n  annotations:\n    summary: \"確定バー品質 FAIL を Parity 維持のため強制 publish\"\n```\n`fx_data_quality_warn_total` も同様に warning レベルで追加。"
+    },
+    {
+      "id": "DE-507",
+      "severity": "medium",
+      "category": "parity_divergence",
+      "title": "_resolve_bollinger_mult が std_dev/std 矛盾時に ATLAS と分岐動作 (ATLAS silent / FTS ValueError)",
+      "location": "trading_platform/data/feature_store/indicators.py:147-183 / ATLAS/atlas/backtest/vectorbt_engine.py:589-600",
+      "description": "FTS `_resolve_bollinger_mult` は `std_dev` と `std` の両方が指定され値が矛盾する場合 `ValueError` を送出する設計 (DE-003 ドキュメント済み)。一方 ATLAS `_bollinger_upper/_bollinger_lower` (vectorbt_engine.py:593,599) は `mult = std_dev if std_dev is not None else (std if std is not None else 2.0)` で **silent に std_dev を優先** する。\n\n結果として、ATLAS で BT PASS した戦略が `std_dev=2.0, std=1.5` のような設定ミスを内包していた場合、FTS Live で初回 register 時に ValueError を投げて戦略起動失敗となる。これは『BT 通過した戦略は必ず Live でロードできる』という SHARED_CONTRACT の前提を破る。\n\nFTS 側のコメント (indicators.py:160-178) は『正常な戦略 config は **どちらか一方のみ** を指定するため Parity に影響しない』と注記しているが、これは strategy generator (fx-strategist エージェント) が両方を埋めない契約に依拠している。契約違反検出機構は存在しない。",
+      "evidence": [
+        "indicators.py:147-183 (ValueError raise)",
+        "ATLAS/atlas/backtest/vectorbt_engine.py:593-600 (silent std_dev 優先)",
+        "indicators.py:160-178 (差異の明文化と契約依存の注記)"
+      ],
+      "recommendation": "(a) ATLAS 側を FTS と同じ fail-fast 設計に揃える [change:spec]、または (b) FTS 側を ATLAS と同じ silent 優先 + WARN ログに変更。後者は『Live は設定ミスを表面化』設計思想を弱めるので、前者を推奨。strategy_loader 経路で『矛盾する std_dev/std を含む config』を pre-validate して REJECT する Stage を追加する案も並行検討。"
+    },
+    {
+      "id": "DE-508",
+      "severity": "medium",
+      "category": "metrics_semantics",
+      "title": "_last_primary_bar_time が time.monotonic() ベースで、再起動を跨ぐ staleness 計測ができない",
+      "location": "trading_platform/data/feature_store/live_store.py:215-219, 443-460",
+      "description": "`_last_primary_bar_time` は `time.monotonic()` で記録され、staleness = `max(0, time.monotonic() - (_last_primary_bar_time + bar_interval))` で算出される。time.monotonic はプロセス起動からの経過秒で、(a) プロセス再起動を跨いだ staleness が常に 0 から再スタート、(b) バー側の bar_time (UTC) との関係性を持たないため、`OANDA 側で confirmed bar の bar_time が 2 時間前` という状況でも、LiveFeatureStore が起動直後に `update_bar` を 2 度呼べば staleness ≈ 0 となる (実時刻の遅延を反映しない)。\n\n本来の意図は『OANDA 側で bar 配信が遅れている』を検知することのはずだが、staleness は『LiveFeatureStore の update_bar が呼ばれてから次の呼出までの wall-clock 経過』しか測っていない。本物の bar 遅延 (OANDA 〜 update_bar 間のレイテンシ) は別途計測が必要。\n\n回避策の代替案: `bar['timestamp']` (BarEvent.bar_time) を保持し、`time.time() - bar_time` の方が semantic として正確。ただし MTF 有効時のみ timestamp が必須となるため、単一 TF モードでは現状の monotonic 方式しか取れない。",
+      "evidence": [
+        "live_store.py:215-219 (monotonic 採用)",
+        "live_store.py:443-460 (staleness 算出)",
+        "live_store.py:399 (単一 TF 時に timestamp 無視)"
+      ],
+      "recommendation": "単一 TF モードでも `update_bar(bar)` 引数に timestamp を含めることを必須化し、`_last_primary_bar_time` は `bar['timestamp']` (UTC datetime) を保持。staleness = `datetime.now(UTC) - bar_time - bar_interval` に変更。これにより再起動後も実時刻ベースで staleness が連続記録され、運用での『5 分間バー来てない』が wall-clock で検出可能。"
+    },
+    {
+      "id": "DE-509",
+      "severity": "medium",
+      "category": "parity_coverage",
+      "title": "Parity テストの fixture が 300 本固定で MAX_REGISTRABLE_PERIOD=1000 / BUFFER_SAFETY_FACTOR=50 のエッジ条件を検証していない",
+      "location": "tests/parity/test_feature_store_parity.py:27-55",
+      "description": "`realistic_ohlcv` fixture が 300 本固定で生成され、Parity テストは ATLAS-2026-0508-069 のような ema_800 を使う戦略のシナリオを検証できない。具体的に:\n  - MAX_REGISTRABLE_PERIOD=1000, BUFFER_SAFETY_FACTOR=50 で `effective_buffer_size = 50000` まで拡張可能だが、Parity テストは 300 本のみ。\n  - LiveFeatureStore のバッファトリミング動作 (line 424-427) は 300 本では発火しないため、トリミング後の EWM ドリフト挙動が未検証。\n  - test_feature_store_parity_buffer_trim.py がトリミング検証を担当している可能性はあるが、ema_400 などの actual production 値での Parity アサートがあるか要確認。\n\n影響:\n  - production 戦略 (ATLAS-2026-0508-069 など) の本番 Parity が CI で担保されていない。\n  - 仮にトリミング閾値より長い period を持つ戦略が登場した場合、EWM 初期値依存で BT/Live の差が増大しても CI が検出しない。",
+      "evidence": [
+        "tests/parity/test_feature_store_parity.py:27-55 (300 本固定)",
+        "live_store.py:89 (MAX_REGISTRABLE_PERIOD=1000)",
+        "live_store.py:49 (BUFFER_SAFETY_FACTOR=50)"
+      ],
+      "recommendation": "Parity テストに『MAX_REGISTRABLE_PERIOD クラスの本番戦略』を模した長期 fixture (例: 5000 本 + ema_400 / ema_800) を追加。さらに `MAX_BUFFER_SIZE` 張り付きシナリオでの EWM ドリフト残差テスト (1e-10 ではなく許容 1e-6 程度のドリフトアサート) を追加し、buffer cap 時の挙動を文書化。"
+    },
+    {
+      "id": "DE-510",
+      "severity": "medium",
+      "category": "data_quality_design",
+      "title": "_check_volume が volume<=0 で FAIL を返すが OANDA mid-only candle (volume=0) は実運用で起こり得る",
+      "location": "trading_platform/data/quality/quality_engine.py:607-618",
+      "description": "`_check_volume` は `bar.volume > 0` でない場合 `passed=False, weight=0.05` を返す。OANDA の特定時間帯 (例: 日曜開場直後の数分、祝日明けの illiquid 時間) では tick が一切来ず volume=0 (= tick count 0) のバーが実運用で観測される。これは『データ品質劣化』ではなく『市場が動いていない』の正常事象だが、品質スコアに weight 0.05 のペナルティを加算する。\n\n影響:\n  - 単発で weight 0.05 のみのため即 FAIL にはならないが、他項目 (spread, gap) の WARN と複合すると min_quality_score=0.7 を下回り FAIL → DE-002 forced-publish 経路に乗る。\n  - 確定バー品質 FAIL は RiskAlertEvent (CRITICAL) を発行するため、illiquid 時間帯に false-positive アラートが発火する可能性。\n  - DE-506 で alerting 化されると週末明け/祝日明けに毎週同じ false-positive が観測される懸念。\n\nまた DE-002 設計の forced-publish 自体は drop しないため Parity 影響はないが、運用ノイズが増える。",
+      "evidence": [
+        "quality_engine.py:607-618",
+        "quality_engine.py:165 (VOLUME_ANOMALY 種別)",
+        "quality_engine.py:809-821 (verdict 閾値 0.70/0.95)"
+      ],
+      "recommendation": "_check_volume を spread_check_mode と同様に 'disabled' / 'enabled' で切替可能にし、デフォルトを 'disabled' とする。または volume=0 のみを WARN として個別扱いし、明示的に negative volume のみ FAIL とする。"
+    },
+    {
+      "id": "DE-511",
+      "severity": "low",
+      "category": "parity_lookahead",
+      "title": "FTS-DATA-011 (allow_exact_matches=False) は ATLAS data_loader と同期済み (検証 OK, 観察報告)",
+      "location": "trading_platform/data/feature_store/live_store.py:703-716 / ATLAS/atlas/backtest/data_loader.py:752-762",
+      "description": "FTS-DATA-011 として `_align_aux_to_primary` の merge_asof で `allow_exact_matches=False` に変更された。ATLAS 側 `atlas/backtest/data_loader.py:752-762` (`align_to_primary`) も同じく `allow_exact_matches=False` で実装されていることを grep で確認した。両側でコメント参照 ID (FTS-DATA-011 / 第9次監査 Round 3) が同じであり、SHARED_CONTRACT は維持されている。\n\nただし、(a) Parity テスト test_feature_store_parity_mtf.py に exact-boundary 専用の fixture (主 TF timestamp と aux TF close_time が完全一致するケース) が含まれているか未確認、(b) 仮に ATLAS 側が将来 allow_exact_matches=True に戻された場合、FTS 側の同期が手動レビュー依存で構造的に保証されない。",
+      "evidence": [
+        "live_store.py:703-716 (allow_exact_matches=False)",
+        "ATLAS/atlas/backtest/data_loader.py:752-762 (allow_exact_matches=False、同 ID 参照)"
+      ],
+      "recommendation": "ATLAS/FTS 両側の `allow_exact_matches` 設定が同期しているかを CI で機械検証するメタテストを追加。tests/parity/conftest.py に AST スキャンで両側を比較する fixture を追加し、乖離時に FAIL する。"
+    },
+    {
+      "id": "DE-512",
+      "severity": "medium",
+      "category": "redis_persistence",
+      "title": "本番 Redis バックエンド (AioRedisBackend) が未実装で StateStore が InMemoryBackend のみ提供する状態が放置されている",
+      "location": "trading_platform/data/state_store/redis_store.py:18-34 / docstring DE-005",
+      "description": "DE-005 / DE-311 で『本番用 Redis バックエンド (AioRedisBackend) は未実装』『state_backend='redis' は config 上は選択可能だが、配線は Stage B 予定』と self-acknowledge されている。UnifiedRunner (本番) は `state_manager.StateManager` の JSONL append-only + atomic snapshot を使用するため StateStore に対する依存は希薄だが、(a) main.py 経路は StateStore に直接依存しており、再起動を跨いだ位置 (position) / 注文 (order) の永続化が完全に process 揮発状態、(b) `state_backend='redis'` を選択しても InMemoryBackend にフォールバックするとは config 上明示されていない、(c) postgres_store.py (CLAUDE.md に存在が記載されている) も未実装で TODO。\n\nDE-311 の判断 (本番経路は StateManager で別系統なので致命ではない) は妥当だが、long-term の技術的負債として複数監査ラウンドで持ち越されている。",
+      "evidence": [
+        "redis_store.py:18-34 (DE-005 / DE-311 docstring)",
+        "CLAUDE.md (state_store.py 配下に postgres_store.py が記載されているが実体なし)"
+      ],
+      "recommendation": "AioRedisBackend の実装計画を ADR 化し、main.py 経路を本番運用しない方針を明文化する (もしくは AioRedisBackend を実装する)。少なくとも config で state_backend='redis' 指定時に AioRedisBackend が未実装ならば fail-fast で REJECT する起動時ガードを追加。"
+    },
+    {
+      "id": "DE-513",
+      "severity": "low",
+      "category": "metrics_semantics",
+      "title": "fx_feature_staleness_sec が 0.0 を継続的に publish し続けるため Prometheus rate/increase が無意味になる",
+      "location": "trading_platform/data/feature_store/live_store.py:444-460",
+      "description": "staleness 値は『次バー到達遅延』として算出され、正常時は 0.0 になる設計。これは正しい仕様だが、Prometheus 観測上は同じ値を毎バー (M15 では 4 回/時間) publish するため:\n  - `rate(fx_feature_staleness_sec[5m])` は常に 0 (Counter ではなく Gauge なのでそもそも意味が薄い)\n  - increase / delta 系も 0 になる\n  - 異常値 (>0) が一瞬出ても次の正常バーで 0 に戻り、Grafana の moving average で hidden になる\n\n現状の alerting_rules.yml は `fx_feature_staleness_sec > 7200` を for=3m で評価しているため、3 分以上連続して staleness > 7200 でないと発火しない。M15 戦略では 3 分間に 1 本のバーが期待され、その 1 本が staleness=0 をリセットするため、実質的に M15 では発火不能。",
+      "evidence": [
+        "alerting_rules.yml:157-180 (for: 3m)",
+        "live_store.py:443-460 (毎バー 0 を publish)"
+      ],
+      "recommendation": "staleness を histogram に変更し、`p99(fx_feature_staleness_seconds_bucket[10m])` で異常値を検出する設計に切替。または、最大値 sustaining gauge (set_max) として publish し、次バーで値が小さくなっても gauge は減衰しない設計に変更。"
+    },
+    {
+      "id": "DE-514",
+      "severity": "low",
+      "category": "data_quality_default",
+      "title": "DataQualityEngine.normal_spread_pips=2.0 のデフォルトは USD_JPY 通常スプレッド (1.5-2.5 pips) の上限であり、pip_based モード切替時に false-positive が頻発する設計",
+      "location": "trading_platform/data/quality/quality_engine.py:120-124, 540-545",
+      "description": "DataQualityConfig は `normal_spread_pips=2.0` がデフォルト、`max_spread_multiplier=3.0` がデフォルトで、pip_based モード時の threshold = 6 pips (USD_JPY なら 0.06 円)。USD_JPY H1 通常バーの high-low は (volatile 時) 0.05-0.20 円に達するため、デフォルト構成で pip_based モードに切替えると **正常バーが頻繁に FAIL** する。\n\nspread_check_mode のデフォルトが 'disabled' なので現状は untriggered だが、本構成のまま pip_based に切替えると DE-002 forced-publish 経路に乗って CRITICAL RiskAlert が大量発火する。コメント (quality_engine.py:108-120) では『二段階ロールアウトとする』と明記しているが、切替時の閾値再キャリブレーション手順が runbook 化されていない。",
+      "evidence": [
+        "quality_engine.py:120-124 (デフォルト 2.0)",
+        "quality_engine.py:108-120 (二段階ロールアウトコメント)"
+      ],
+      "recommendation": "spread_check_mode='pip_based' に切替える際の必須キャリブレーション手順を docs/runbook/spread_check_calibration.md に明文化。切替前に instrument 別の 30 日 high-low 分布から normal_spread_pips を再算出するスクリプトを scripts/calibrate_spread.py で提供。"
+    },
+    {
+      "id": "DE-515",
+      "severity": "low",
+      "category": "parity_test_coverage",
+      "title": "test_no_uncovered_builtin_indicators は frozen list 比較のため builtin に 'open' / 'volume' / 'spread' などの計算プリミティブが追加されたら自動失敗するが、現状の網羅はメタテストのみ",
+      "location": "tests/parity/test_feature_store_parity.py:300-316 / tests/parity/conftest.py:29-49",
+      "description": "PARITY_COVERED_INDICATORS は frozenset で hardcode され、ATLAS 側に新指標が追加されると test_no_uncovered_builtin_indicators が即 FAIL する設計。これは良い仕様だが、(a) 追加指標が無限ループ的に PARITY_COVERED に追記されるだけで本当の Parity テスト (test_xxx_parity) が同時に書かれない可能性、(b) reviewer は『conftest.py 1 行追記』を簡単な対応と誤認しやすい。\n\nメタテストが 'covered' を判定する基準は『PARITY_COVERED_INDICATORS に名前があるか』のみで、対応する test_xxx_parity が実際に 1e-10 アサートしているかは検証していない。",
+      "evidence": [
+        "tests/parity/test_feature_store_parity.py:300-316",
+        "tests/parity/conftest.py:29-49"
+      ],
+      "recommendation": "conftest.py の covered list を AST 走査で『test_xxx_parity 関数が実際に存在し、TOLERANCE assert を含むか』を機械検証する形に強化。または、PARITY_COVERED を削除し、ast.parse で `test_feature_store_parity.py` をスキャンして自動収集する仕組みに置換。"
+    },
+    {
+      "id": "DE-516",
+      "severity": "low",
+      "category": "data_quality_design",
+      "title": "_check_gap の weekend 計算が UTC ベースだが OANDA の '週末' は broker tz に依存する潜在的差異",
+      "location": "trading_platform/data/quality/quality_engine.py:736-786",
+      "description": "DE-306 修正で `_count_weekend_seconds` は『金曜 22:00 UTC 〜 日曜 22:00 UTC』を閉鎖期間として実装されている。OANDA の公式仕様もこの 時間帯なので原理的には正しい。しかし、(a) 夏時間 (DST) 切替時に UTC 表記の市場開閉時刻が変動する OANDA broker は (公式には) 存在しないが、過去にいくつかのアジア broker で broker-tz-based の close 時刻を採用した例がある、(b) コード内に DST 切替期間の検証ロジックは含まれていない。\n\n本問題はリスク低 (OANDA v20 API のみ使うため)。ただし、第三者 broker サポート時に検証必要。",
+      "evidence": [
+        "quality_engine.py:736-786",
+        "DE-306 (AUDIT-2026-0529-001) 修正履歴"
+      ],
+      "recommendation": "WeekendWindow を broker_kind 別に切り替え可能な設計に拡張する将来計画を ADR 化。現状は OANDA 専用のため変更不要。"
+    }
+  ]
+}

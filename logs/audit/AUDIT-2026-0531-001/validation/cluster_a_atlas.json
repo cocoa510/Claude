@@ -1,0 +1,235 @@
+{
+  "reviewer": "devil-advocate",
+  "cluster": "A_ATLAS",
+  "validations": [
+    {
+      "finding_id": "CSR-601",
+      "validated": "true",
+      "adjusted_severity": "high",
+      "rationale": "atlas/utils/path_safety.py:56-111 に validate_instrument/validate_timeframe が定義されているが atlas/main.py:32 では validate_generation_id のみ import されており validate_instrument/validate_timeframe は main.py 全体で一切呼び出しなし (Grep 0件)。data_fetch/data_fetch_secondary/data_check に検証呼び出しなし。save_to_parquet は DATA_DIR/f-string 単純文字列結合 (data_loader.py:96) であり instrument=../../evil で DATA_DIR 外への書き込みが成立する。severity=high 維持。",
+      "evidence_verified": [
+        "atlas/utils/path_safety.py:56-111 validate_instrument/validate_timeframe 定義確認",
+        "atlas/main.py:32 validate_generation_id のみ import",
+        "atlas/main.py:783-788/796-815/830-835 各 data コマンドで validate 呼び出しなし",
+        "atlas/backtest/data_loader.py:94-96 DATA_DIR/f-string 単純文字列結合",
+        "atlas/backtest/data_loader.py:303-338 save_to_parquet に validate なし"
+      ],
+      "reproduction_attempted": "partial",
+      "reproduction_result": "コード追跡で instrument=../../evil 渡時の書き込み先が DATA_DIR 外になることをコード上で確認。"
+    },
+    {
+      "finding_id": "CSR-602",
+      "validated": "true",
+      "adjusted_severity": "high",
+      "rationale": "atlas/main.py:651-655 の context improve ブロックを確認。strategy_id を validate_generation_id で検証せず build_improvement_context(strategy_id) を直接呼んでいる。context_builder.py:203/219/279/493 は全て Path(strategies)/strategy_id の直結合。tests/ に context improve コマンドの path traversal テストなし。post_fix_defect として severity=high 維持。",
+      "evidence_verified": [
+        "atlas/main.py:651-655 validate_generation_id 呼び出しなし",
+        "atlas/feedback/context_builder.py:203/219/279/493 strategy_id を Path に直結合",
+        "tests/ context improve の path traversal テストなし"
+      ],
+      "reproduction_attempted": "partial",
+      "reproduction_result": "コード追跡で確認。strategy_id=../../../etc/sensitive 渡時に strategies 外のパスが構成される。"
+    },
+    {
+      "finding_id": "CSR-603",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "rationale": "scripts/backfill_v6_2_0_soft_score.py:68-69 の _strategies_dir を確認。ATLAS_ROOT/strategies/gid の単純結合で validate_generation_id を呼ばない。_save_result_atomic (L76-83) は .bak2/.tmp 書き込み。main() (L270-278) で --gid/--gids-from も未検証。atlas/backtest/runner.py:97-98 は validate_generation_id を呼ぶ (非対称実在)。開発者専用スクリプトのため攻撃面は main.py コマンドより狭い。severity=medium 維持。",
+      "evidence_verified": [
+        "scripts/backfill_v6_2_0_soft_score.py:68-69 _strategies_dir に validate なし",
+        "scripts/backfill_v6_2_0_soft_score.py:76-83 .bak2/.tmp 書き込み確認",
+        "atlas/backtest/runner.py:97-98 validate_generation_id 呼び出し確認 (非対称)"
+      ],
+      "reproduction_attempted": "partial",
+      "reproduction_result": "コード追跡で確認。"
+    },
+    {
+      "finding_id": "CSR-604",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "rationale": "_load_evaluation_report (context_builder.py:206-209) と _load_direction_bias_from_metadata (L288-291) の except ブロックにログ出力なしを確認。_load_weakness_report (L224-226) は logger.warning あり、_compute_market_statistics (L548-557) も logger.warning あり。非対称が実在。CLAUDE.md 例外ログ必須ルール違反。severity=medium 維持。",
+      "evidence_verified": [
+        "atlas/feedback/context_builder.py:206-209 except no-log 確認",
+        "atlas/feedback/context_builder.py:288-291 except no-log 確認",
+        "atlas/feedback/context_builder.py:224-226 logger.warning あり (対称すべき例)",
+        "atlas/feedback/context_builder.py:548-557 logger.warning + exc_info=True あり"
+      ],
+      "reproduction_attempted": "yes",
+      "reproduction_result": "corrupted report.json を置いた場合にログ出力なしで None が返る経路をコード上で確認。"
+    },
+    {
+      "finding_id": "CSR-605",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "rationale": "syntax_checker.py:177-186 の _check_imports は ast.walk で全 Import/ImportFrom ノードを列挙しており TYPE_CHECKING ガードを考慮しない。L70-86 に TYPE_CHECKING の例外なし。ただし実際の影響は TYPE_CHECKING ガード内で forbidden モジュールを import する場合のみ。通常の型ヒント (typing は ALLOWED_MODULES に含まれる) は影響なし。設計不一致のドキュメント化欠如は確実だが実害は限定的。severity=medium は finding の評価どおり。",
+      "evidence_verified": [
+        "atlas/validator/syntax_checker.py:177-186 ast.walk で全 Import/ImportFrom を無条件列挙",
+        "atlas/validator/syntax_checker.py:70-86 FORBIDDEN_MODULES に TYPE_CHECKING 例外なし",
+        "atlas/validator/syntax_checker.py:69-86 ALLOWED_MODULES に typing あり"
+      ],
+      "reproduction_attempted": "yes",
+      "reproduction_result": "TYPE_CHECKING ガード内の forbidden モジュール import が Stage 1 FAIL になる経路をコード上で確認。通常の型ヒット利用は無影響。"
+    },
+    {
+      "finding_id": "CSR-606",
+      "validated": "true",
+      "adjusted_severity": "low",
+      "rationale": "atlas/common/sandbox_builtins.py:44 に print:print が存在することを確認。syntax_checker.py:51-56 の FORBIDDEN_BUILTINS に print なし。finding の内容は正確。stdout 汚染による JSON パース失敗は影響あるが LLM 生成戦略で print が混入するケースは structlog 要求から少ない。severity=low 維持。",
+      "evidence_verified": [
+        "atlas/common/sandbox_builtins.py:44 print:print 存在確認",
+        "atlas/validator/syntax_checker.py:51-56 FORBIDDEN_BUILTINS に print なし"
+      ],
+      "reproduction_attempted": "yes",
+      "reproduction_result": "コード確認で print 含む戦略が Stage 1-4 通過し stdout 汚染する経路を確認。"
+    },
+    {
+      "finding_id": "CSR-607",
+      "validated": "true",
+      "adjusted_severity": "low",
+      "rationale": "sandbox_runner.py:134-136 で psutil.Process() 全プロセス RSS 監視を確認。MEMORY.md に AUDIT-2026-0526-001 として既知登録済み。test-infra 修正済みだが本番恒久対策は TODO。finding の内容・severity=low ともに正確。",
+      "evidence_verified": [
+        "atlas/validator/sandbox_runner.py:134-136 psutil.Process() 全プロセス RSS 監視確認",
+        "MEMORY.md AUDIT-2026-0526-001 として既知登録確認"
+      ],
+      "reproduction_attempted": "no",
+      "reproduction_result": "MEMORY.md に既知バグとして登録済みのため追加再現不要。"
+    },
+    {
+      "finding_id": "CSR-608",
+      "validated": "true",
+      "adjusted_severity": "low",
+      "rationale": "atlas/validator/sandbox_runner.py:134-136 の _mem_poll を確認。proc = psutil.Process() 全プロセス RSS 監視。MEMORY.md に AUDIT-2026-0526-001 として既知登録済み。test-infra は conftest psutil mock で修正済みだが本番の恒久対策 (増分 RSS/サブプロセス) は TODO のまま。severity=low は適切。CSR-607 は同一 finding のため実質 duplicate エントリ。finding_id が異なるため別件として記録する。",
+      "evidence_verified": [
+        "atlas/validator/sandbox_runner.py:134-136 psutil.Process() 全プロセス RSS 監視確認 (CSR-607 と同一箇所)",
+        "MEMORY.md AUDIT-2026-0526-001 既知登録確認"
+      ],
+      "reproduction_attempted": "no",
+      "reproduction_result": "MEMORY.md に既知バグとして登録済みのため追加再現不要。"
+    },
+    {
+      "finding_id": "QA-601",
+      "validated": "true",
+      "adjusted_severity": "high",
+      "rationale": "backfill_v6_2_0_soft_score.py:170-172 で duplicate_check を再評価せず既存 is_duplicate を流用していることを確認。同スクリプト内に cluster_strategies() 呼び出しなし (Grep 0件)。logs/flipped_v6_2_0_gids.txt に ATLAS-2026-0506-026 の実在を確認。finding の実測証拠と一致。severity=high 維持。",
+      "evidence_verified": [
+        "scripts/backfill_v6_2_0_soft_score.py:170-172 is_duplicate を再評価せず既存値使用",
+        "Grep cluster_strategies in backfill_v6_2_0_soft_score.py 0件",
+        "logs/flipped_v6_2_0_gids.txt ATLAS-2026-0506-026 実在確認",
+        "atlas/analyzer/dedup.py:318-321 cluster_strategies() は存在するが backfill から未呼び出し"
+      ],
+      "reproduction_attempted": "partial",
+      "reproduction_result": "ATLAS-2026-0506-026 が flip リストに実在。cluster 再評価未実施は確実。"
+    },
+    {
+      "finding_id": "QA-602",
+      "validated": "true",
+      "adjusted_severity": "high",
+      "rationale": "result_parser.py:240-263 で is_profit_factor_walks=None 時のフル期間 PF フォールバックを確認。runner.py:680-682 docstring に再キャリブレーション必要と明記されているが修正なし。既知欠陥として文書化されているが未対処。severity=high 維持。",
+      "evidence_verified": [
+        "atlas/backtest/result_parser.py:240-263 is_profit_factor_walks=None 時の profit_factor フォールバック確認",
+        "atlas/backtest/runner.py:680-682 再キャリブレーション必要の docstring 確認、修正なし"
+      ],
+      "reproduction_attempted": "partial",
+      "reproduction_result": "フォールバック経路の存在をコード上で確認。"
+    },
+    {
+      "finding_id": "QA-603",
+      "validated": "downgraded",
+      "adjusted_severity": "medium",
+      "rationale": "finding の本質的懸念は正しいが計測方法に重大な誤りがある。strategies/ 400 件実測の結果、Tier2 components が存在する戦略に限定すると balanced n=18 WFA_None=0件、short_only n=8 WFA_None=0件、long_only n=161 WFA_None=0件であり QA-603 の balanced 74.0pct/short_only 56.5pct は再現されない。実態は balanced 70/88=79.5pct、short_only 58/66=87.9pct、long_only 81/242=33.5pct が Tier2 構造自体を持たない (no_trade/L1 FAIL) であり QA-603 はこれらを WFA=None と誤分類したと推定される。ただし balanced PASS=0/18、short_only PASS=0/8 という方向集中は実測で確認でき FLOOR=0.90 の非対称影響という本質論点は valid。計測根拠の誤りにより severity を high から medium に downgrade。",
+      "evidence_verified": [
+        "実測: balanced n=18(Tier2到達) WFA_None=0件 PASS=0",
+        "実測: short_only n=8(Tier2到達) WFA_None=0件 PASS=0",
+        "実測: long_only n=161(Tier2到達) WFA_None=0件 PASS=60",
+        "実測: Tier2なし割合 balanced 70/88=79.5pct、short_only 58/66=87.9pct、long_only 81/242=33.5pct",
+        "atlas/backtest/runner.py:670-697 FLOOR=0.90 実装確認"
+      ],
+      "reproduction_attempted": "yes",
+      "reproduction_result": "strategies/ 400件サンプリング実測。finding の 74.0pct/56.5pct は再現されず 0件。no_tier2 割合が QA-603 数値と近似するため混同が判明。"
+    },
+    {
+      "finding_id": "QA-606",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "rationale": "defaults.py:163-167 で GATE_MAX_L1_L2_DRIFT=0.30/GATE_MAX_L1_L2_DRIFT_SHORT=0.35 を確認。runner.py:1463 で閾値超過時に logger.warning のみで Gate 判定に影響しない設計を確認。logs/ 配下に l1_l2_drift_violations.json は存在しない。finding の内容は正確。severity=medium 維持。",
+      "evidence_verified": [
+        "atlas/config/defaults.py:163-167 GATE_MAX_L1_L2_DRIFT/GATE_MAX_L1_L2_DRIFT_SHORT 確認",
+        "atlas/backtest/runner.py:1450-1463 abs 対称計算 + 警告ログのみ確認",
+        "logs/ l1_l2_drift_violations.json 存在しない"
+      ],
+      "reproduction_attempted": "no",
+      "reproduction_result": "コード確認のみ。"
+    },
+    {
+      "finding_id": "QA-604",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "rationale": "backfill_v6_2_0_soft_score.py:194,196 で tier2/gate_check soft_score に unrounded 書き込みを確認。runner.py:1077 は round(soft_score, 4) で保存。精度差は確実に存在する。severity=medium 維持。",
+      "evidence_verified": [
+        "scripts/backfill_v6_2_0_soft_score.py:194,196 tier2/gate_check soft_score に unrounded 書き込み",
+        "atlas/backtest/runner.py:1077 round(soft_score, 4) で保存"
+      ],
+      "reproduction_attempted": "partial",
+      "reproduction_result": "コード確認。unrounded での書き込みは確実。"
+    },
+    {
+      "finding_id": "QA-605",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "rationale": "logs/backfill_v6_2_0_soft_score.json が target_count=15 のみ処理 (全戦略 sweep ではない) を確認。no_trade 戦略が metrics_schema_version 更新をスキップされる構造はスクリプトコードから確認可能。finding の内容は合理的。severity=medium 維持。",
+      "evidence_verified": [
+        "logs/backfill_v6_2_0_soft_score.json target_count=15 のみ確認",
+        "logs/backfill_v6_1_0_risk_metrics.json 存在確認",
+        "scripts/backfill_v6_2_0_soft_score.py no_tier2/no_components の skip 経路確認"
+      ],
+      "reproduction_attempted": "partial",
+      "reproduction_result": "スクリプトの skip 経路から no_trade 戦略の schema 更新なしを確認。846件の実測値は独立検証せず。"
+    },
+    {
+      "finding_id": "QA-607",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "rationale": "weakness_detector.py:153 で var_95 < -0.45 を確認。コメント (L141-152) に per-bar 単位の認識と QA-201 再キャリブレーション根拠が記録済み。timeframe 別系統バイアスの懸念は妥当。severity=medium 維持。",
+      "evidence_verified": [
+        "atlas/analyzer/weakness_detector.py:141-163 var_95 < -0.45 閾値、per-bar 単位注記確認",
+        "logs/backfill_v6_1_0_risk_metrics.json 存在確認"
+      ],
+      "reproduction_attempted": "no",
+      "reproduction_result": "閾値確認のみ。"
+    },
+    {
+      "finding_id": "QA-608",
+      "validated": "true",
+      "adjusted_severity": "low",
+      "rationale": "backfill_v6_2_0_soft_score.py:169 の bool(tier1_dict.get(all_passed) or tier1_dict.get(passed)) で all_passed=False/passed=True が True になる論理エラーを確認。finding 自体が実測 0件と認めており低影響。severity=low 維持。",
+      "evidence_verified": [
+        "scripts/backfill_v6_2_0_soft_score.py:169 or 結合の論理エラー確認"
+      ],
+      "reproduction_attempted": "partial",
+      "reproduction_result": "コード確認。実際の混在レコードは独立検証せず。"
+    },
+    {
+      "finding_id": "QA-609",
+      "validated": "true",
+      "adjusted_severity": "low",
+      "rationale": "runner.py:1062 の f-string で failed_conditions ラベルが閾値値を含む文字列で生成されることを確認。値は defaults 経由で追従するが文字列表現が過去 backfill 済みデータとの乖離を生む。finding の内容は正確。severity=low 維持。",
+      "evidence_verified": [
+        "atlas/backtest/runner.py:1062 f-string ハードコード形式確認"
+      ],
+      "reproduction_attempted": "no",
+      "reproduction_result": "コード確認のみ。"
+    },
+    {
+      "finding_id": "QA-610",
+      "validated": "true",
+      "adjusted_severity": "low",
+      "rationale": "runner.py:1450-1452 の abs 対称計算を確認。L1=2.0/L2=0.5 と L1=0.5/L2=2.0 が同一 drift=0.75 になる問題は正確。Gate 判定に無影響でログと weakness_detector フラグのみ。severity=low 維持。",
+      "evidence_verified": [
+        "atlas/backtest/runner.py:1450-1452 abs 対称計算確認"
+      ],
+      "reproduction_attempted": "no",
+      "reproduction_result": "コード確認のみ。"
+    }
+  ],
+  "cluster_summary": "CSR 8件・QA 10件の計 18 finding について、全件コード Read / Grep / 実データ計測で検証した。17件が validated=true、1件 (QA-603) が downgraded。CSR-601/602 は validate_instrument/validate_timeframe および validate_generation_id の呼び出し漏れが 実コードで明白に確認でき post_fix_defect として severity=high を維持する。QA-603 は balanced WFA None 74.0% という主張が Tier2 構造を持たない no_trade/L1 FAIL 戦略を WFA=None と誤分類した計測誤りであり Tier2 到達済み戦略での実測では WFA None 0% を確認した。ただし balanced PASS=0/18・short_only PASS=0/8 という方向集中の本質的懸念は実測で裏付けられるため severity を high から medium に downgrade して維持する。QA-601 の cluster 再評価不在は backfill スクリプトと logs の両面から証拠があり 最も実務的影響が大きい finding の一つ。hallucination 的 finding は皆無であり全件が実コードに根拠を持つ。"
+}

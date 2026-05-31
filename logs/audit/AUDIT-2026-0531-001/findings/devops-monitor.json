@@ -1,0 +1,149 @@
+{
+  "audit_id": "AUDIT-2026-0531-001",
+  "agent": "devops-monitor",
+  "generated_at": "2026-06-01T00:00:00+00:00",
+  "commit_ref": "fca45f23",
+  "audit_summary": "監視・通知系の前回修正（RE-401/DM-302 OANDA計装、DM-403 TimeoutError、DM-408 feature_staleness意味論、DM-101 dashboard配線、EmailNotifier first-send throttle、hourly bot CI修正）は本番経路（main.py/runner.py/forward_test.py）で対称的に適用されており、主要な生存は確認できた。しかし10件のnew findingを発見した。最重要はDM-501: StrategySlot._metricsが注入されておらず、FxStalePnlTransientSkipHighアラートが本番で機能しない（getattr防御が常にNoneを返す設計欠陥）。DM-502: alerting_rules.ymlに8種類のメトリクス（fx_snapshot_persistence_failures、fx_backfill_failures、fx_slippage_missing、fx_data_quality_forced_publish、fx_feature_store_compute_errors、fx_signal_silence_sec、fx_live_eligible_key_missing、fx_kill_switch_cancel_failedに対応するアラートルール）が未定義で、本番計上されても一切通知されない。DM-503: FxFeatureStorestaleHighの週末mute窓に日曜22:00-23:59 UTC（OANDA開場後2時間）の既知false-negative窓が残る。DM-504: Gmail 534 SMTPAuthenticationError に対する恒久対策（再試行の種別分岐・診断ログ強化）が未実装で、SMTP認証失敗時にリトライ枯渇まで無駄な3回試行が走り続ける。DM-507: settings.pyのnotify_email_toデフォルト値に実メールアドレス510.cocoa@gmail.comがハードコードされており、環境変数未設定時にテスト/CI環境から本番アドレスへ誤送信リスクがある。",
+  "findings": [
+    {
+      "id": "DM-501",
+      "severity": "high",
+      "category": "metrics_instrumentation",
+      "title": "StrategySlot に metrics 注入経路が存在せず FxStalePnlTransientSkipHigh アラートが本番で dead",
+      "description": "strategy_slot.py:1971-1984 の inc_stale_pnl_transient_skip 呼び出しは `getattr(self, '_metrics', None)` で取得するが、StrategySlot.__init__（strategy_slot.py:151-200）には metrics パラメータが存在しない。runner.py:781-793 の StrategySlot コンストラクタ呼び出しにも metrics= 引数が渡されていないため、self._metrics は常に AttributeError 扱いで None が返り続ける。RE-501 Phase 4.5 BLOCKING で追加したカウンタ fx_stale_pnl_transient_skip_total が本番で一切加算されず、AUDIT-2026-0530-002 で追加した FxStalePnlTransientSkipHigh アラートが永久に発火しない。コメントには『将来 runner.py から set_metrics_collector で注入された場合のみ active 化する』と書かれているが実装されていない。",
+      "evidence": {
+        "file": "trading_platform/core/unified_runner/strategy_slot.py",
+        "line_range": "151-200, 1967-1985",
+        "detail": "StrategySlot.__init__ に metrics パラメータなし。runner.py:781-793 の StrategySlot() 呼び出しにも metrics= なし"
+      },
+      "impact": "OANDA 一時障害で stale PnL recovery が transient skip を繰り返しても oncall に通知されない。FxStalePnlTransientSkipHigh アラートは設計上存在するが本番で永久 Inactive",
+      "recommendation": "StrategySlot.__init__ に metrics: MetricsCollector | None = None パラメータを追加し、runner.py の StrategySlot() 呼び出しに metrics=self._metrics を渡す"
+    },
+    {
+      "id": "DM-502",
+      "severity": "medium",
+      "category": "alerting_rules",
+      "title": "alerting_rules.yml に 8 種のメトリクス対応アラートルールが未定義",
+      "description": "metrics.py に定義・計上されているが deploy/prometheus/alerting_rules.yml に対応するアラートルールが存在しないメトリクスが 8 種ある: (1) fx_snapshot_persistence_failures_total（OrderSubmissionGuard 失敗）, (2) fx_backfill_failures_total（Backfill 失敗）, (3) fx_slippage_missing_total（slippage 計測不能）, (4) fx_data_quality_forced_publish_total（品質 FAIL 確定バーの強制 publish）, (5) fx_feature_store_compute_errors_total（FeatureStore 計算エラー）, (6) fx_signal_silence_sec（戦略別シグナル沈黙時間 gauge）, (7) fx_live_eligible_key_missing_total（live_eligible キー欠如戦略）, (8) fx_email_notifier_sent_total/kill_switch_cancel_failed（kill_switch_cancel_failed kind の email notifier failed アラートが kind 別に未分岐）。これらは本番で計上されても Prometheus アラートによる oncall 通知が一切行われない。",
+      "evidence": {
+        "file": "deploy/prometheus/alerting_rules.yml",
+        "line_range": "全行（255行中）",
+        "detail": "grep 'alert:' で確認した結果、上記 8 カテゴリに対応する rule が存在しない"
+      },
+      "impact": "OrderSubmissionGuard 失敗・Backfill 失敗・FeatureStore 計算エラー・戦略長時間沈黙などの異常が Prometheus レベルで無音のまま。Dashboard で手動確認しなければ検知できない",
+      "recommendation": "alerting_rules.yml に FxSnapshotPersistenceFailure、FxBackfillFailureHigh、FxFeatureStoreComputeErrorHigh、FxSignalSilenceHigh の最低 4 ルールを追加する。slippage_missing と data_quality_forced_publish は情報系でもよいが rate > 0 で WARNING 化を推奨"
+    },
+    {
+      "id": "DM-503",
+      "severity": "low",
+      "category": "alerting_rules",
+      "title": "FxFeatureStorestaleHigh 週末 mute に日曜 22:00-23:59 UTC の false-negative 窓が残存",
+      "description": "alerting_rules.yml:139-201 の FxFeatureStorestaleHigh は DE-504 修正（AUDIT-2026-0530-002）で週末閉場 mute を PromQL に組み込んだが、既知制約として日曜 22:00 UTC（OANDA 開場時刻）から月曜 00:00 UTC までの 2 時間がアラート抑止のまま継続する。コメント（L142-156）にはこの制約が明記されているが、恒久解決（Alertmanager mute_time_intervals への移行 or `(hour() != 22 or day_of_week() != 0)` 追記）は未対応。開場直後の OANDA 接続障害や BarBuilder 遅延が 2 時間以内に収まれば検知されない。",
+      "evidence": {
+        "file": "deploy/prometheus/alerting_rules.yml",
+        "line_range": "142-156",
+        "detail": "コメント『日曜 22:00-23:59 UTC の 2 時間はアラート抑止が継続したまま』が既知制約として記載"
+      },
+      "impact": "日曜 22:00-23:59 UTC に BarBuilder 遅延や FeatureStore stale が発生しても FxFeatureStorestaleHigh が 2 時間発火しない。週次開場時の実害は限定的だが、対策の明確な実装計画が必要",
+      "recommendation": "expr に `and (hour() != 22 or day_of_week() != 0)` を追加し日曜 23:00 UTC から発火再開させるか、Alertmanager の mute_time_intervals で時刻ベース mute に統一する"
+    },
+    {
+      "id": "DM-504",
+      "severity": "medium",
+      "category": "email_notifier",
+      "title": "Gmail SMTPAuthenticationError（534）に対する恒久対策が未実装",
+      "description": "email_notifier.py:1189-1228 の _send_email_async はリトライ時に `except Exception` で全例外を補足して指数バックオフ再試行するが、smtplib.SMTPAuthenticationError（Gmail 534）は一時障害ではなく認証設定の恒久的な失敗であり、再試行しても成功しない。現実装では 3 回 × backoff 合計最大 3 秒の無駄な試行が走り続け、最終的にリトライ枯渇で failure カウンタが +3 加算される。認証エラー時に即座にリトライを諦めて CRITICAL ログを出力し、メール本文に SMTP 設定確認手順を含める診断パスが存在しない。MEMORY.md の INV-2026-0528-001 で修正済みの throttle 問題とは別に、认証エラー再試行の非効率が残っている。",
+      "evidence": {
+        "file": "trading_platform/core/monitoring/email_notifier.py",
+        "line_range": "1189-1228",
+        "detail": "_SMTP_MAX_ATTEMPTS = 3 / except Exception でリトライ / SMTPAuthenticationError の早期脱出なし"
+      },
+      "impact": "Gmail アプリパスワード設定ミス・期限切れ時に 3 回リトライが走り、合計最大 3 秒のブロックが発生。すべての FILL / Kill Switch 通知が delayed になる。再起動後も永続的に失敗し続けるが oncall への特別通知なし",
+      "recommendation": "smtplib.SMTPAuthenticationError を `except` で個別に捕捉し、リトライせず即 CRITICAL ログ + metrics 記録して呼出元に raise する。アプリパスワード設定手順を error メッセージに含める"
+    },
+    {
+      "id": "DM-505",
+      "severity": "low",
+      "category": "dashboard",
+      "title": "Streamlit dashboard の state ファイル直読み経路で UnifiedRunner 未起動時のエラーメッセージが誤誘導",
+      "description": "dashboard/app.py:72-81 の _read_state_files() は STATE_DIR が存在しない場合 `error: state ディレクトリが存在しません` を返し、app.py:181-194 で `streamlit run` 起動コマンド案内のみが表示される。しかし本番主経路（FTS_DASHBOARD_API_BASE_URL 未設定）では STATE_DIR=logs/unified_state/ を直読みするため、UnifiedRunner が起動していても STATE_DIR が別 drive やパスの場合（Windows パス vs WSL2 パスの違い）に誤検知する。また fetch_health() の state ファイル経路（app.py:137-138）はファイル存在チェックのみで、ファイルが破損・stale（60秒以上前）でも `status: running` を返し続ける。",
+      "evidence": {
+        "file": "trading_platform/dashboard/app.py",
+        "line_range": "63-139",
+        "detail": "fetch_health() は *.state.json 存在確認のみ。stale 検出ロジックなし"
+      },
+      "impact": "UnifiedRunner がクラッシュして stale な state ファイルが残った場合、Dashboard は 'running' と表示し続ける。運用者がシステム停止に気づかない可能性がある",
+      "recommendation": "fetch_health() の state ファイル経路で最終更新時刻をチェックし、60 秒以上更新がない場合は `status: stale` を返す。State ファイルに last_heartbeat タイムスタンプを記録する"
+    },
+    {
+      "id": "DM-506",
+      "severity": "low",
+      "category": "metrics_instrumentation",
+      "title": "fx_signal_silence_sec の更新が StrategyWorker 経由のみで UnifiedRunner/StrategySlot 経路では更新されない",
+      "description": "metrics.py:304-312 に fx_signal_silence_sec gauge が定義され、strategy_engine/worker.py:373-376 の set_signal_silence_sec が更新を担う。しかし本番経路（run_unified.py → UnifiedRunner → StrategySlot）では StrategyWorker を使用せず StrategySlot が直接 generate_signal() を呼ぶ（strategy_slot.py:428 StrategyWorker._process_bar と同パターン）。このため本番では fx_signal_silence_sec が一切更新されず、戦略別シグナル沈黙可視化が機能しない。DM-502 でアラートルールも未定義だが、仮にルールを追加しても本番では gauge が 0 または初期値のまま。",
+      "evidence": {
+        "file": "trading_platform/core/strategy_engine/worker.py",
+        "line_range": "373-376",
+        "detail": "set_signal_silence_sec の唯一の呼び出しが worker.py にのみ存在し、strategy_slot.py には同等の更新コードなし"
+      },
+      "impact": "本番（UnifiedRunner）で戦略別シグナル沈黙時間が全て 0 または未更新のまま。M-O2 (PR50) の監視目的が本番で達成されていない",
+      "recommendation": "strategy_slot.py の _handle_entry / _handle_exit 相当箇所に set_signal_silence_sec を追加するか、StrategySlot に _last_signal_at を持たせて定期的に gauge を更新するロジックを実装する"
+    },
+    {
+      "id": "DM-507",
+      "severity": "medium",
+      "category": "email_notifier",
+      "title": "notify_email_to デフォルト値に実メールアドレスがハードコード",
+      "description": "settings.py:211-217 の notify_email_to フィールドのデフォルト値が `default='510.cocoa@gmail.com'` とハードコードされている。環境変数 NOTIFY_EMAIL_TO を設定しない場合（CI 環境・新規開発環境・テスト環境）で notify_email_enabled=True が有効になると、実際のメールアドレスに誤送信される。現在は notify_email_enabled=False がデフォルトであるため実害は限定的だが、テスト時に enabled=True を指定すると CI ランナーから外部メールが送信される可能性がある。また個人メールアドレスがコードベースにコミットされている点はセキュリティプラクティス上の問題。",
+      "evidence": {
+        "file": "trading_platform/config/settings.py",
+        "line_range": "211-217",
+        "detail": "notify_email_to: str = Field(default='510.cocoa@gmail.com', ...)"
+      },
+      "impact": "CI 環境や開発者が誤って notify_email_enabled=True で起動した場合、FILL / Kill Switch 通知が実メールアドレスに配信される",
+      "recommendation": "デフォルトを空文字列 `default=''` に変更し、未設定時は EmailNotifier.start() の既存ガード（notify_email_to が空なら起動しない）が機能するようにする"
+    },
+    {
+      "id": "DM-508",
+      "severity": "low",
+      "category": "ci_notification",
+      "title": "parity.yml の unit tests ステップ失敗時に 'Parity CI' 名で通知メールが届き parity/unit 失敗を件名で区別不能",
+      "description": "parity.yml:107-113 の 'Run unit tests' ステップは parity.yml ワークフローに統合されており、ユニットテスト失敗時の GitHub Actions 通知メールも 'Parity CI' の件名で届く（コメント L102-107 参照）。parity 破壊とユニットテスト失敗を件名から区別できないため、oncall が通知メールを見てもどちらの問題か即判断できない。コメントでは unit.yml への分離を「将来検討」として未着手になっている。",
+      "evidence": {
+        "file": ".github/workflows/parity.yml",
+        "line_range": "95-113",
+        "detail": "コメント: 'unit tests 失敗時の GitHub Actions 通知メールが Parity CI 名で届くため、parity/contract 破壊と unit 失敗を件名から区別できない'"
+      },
+      "impact": "障害対応時に通知メールだけでは parity 破壊か unit テスト失敗かの優先度判断ができない。将来ワークフローが増えた場合のトリアージ効率が低下する",
+      "recommendation": ".github/workflows/unit.yml を新設して unit tests を分離し、通知メールの件名を 'Unit CI' と 'Parity CI' で区別できるようにする"
+    },
+    {
+      "id": "DM-509",
+      "severity": "low",
+      "category": "health_check",
+      "title": "HealthChecker PROBER_UNHEALTHY_THRESHOLD=3 に達する前の degraded 状態が CRITICAL_COMPONENTS に伝播せず /health が誤 healthy を返す",
+      "description": "health_check.py:369-386 の _run_single_prober は連続失敗が PROBER_UNHEALTHY_THRESHOLD(=3) 未満の場合 `comp.status = 'degraded'` に留まる（ヒステリシス設計）。しかし _aggregate_system_status (health_check.py:484-504) は critical コンポーネントの 'degraded' を 'unhealthy' に昇格しない（`if comp.status == 'unhealthy': if comp.critical: return 'unhealthy'`）。結果として oanda/event_bus が 1-2 回 ping 失敗しても /health エンドポイントは 'healthy' を返し続け、ロードバランサのヘルスチェックや監視システムが正常と誤判断する。H-7 の意図（フラッピング防止）は正しいが critical コンポーネントの degraded は 'degraded' としてシステムステータスに反映されるべき。",
+      "evidence": {
+        "file": "trading_platform/core/monitoring/health_check.py",
+        "line_range": "484-504",
+        "detail": "_aggregate_system_status: critical コンポーネントの 'degraded' を 'unhealthy' 扱いするロジックがない。check_all() の 'status' キーは 'healthy' / 'unhealthy' の二値のみ"
+      },
+      "impact": "OANDA 接続が不安定な状態でも /health が 'healthy' を返し続ける。Kubernetes / ALB の liveness probe が正常と判定して Pod の再起動が抑止される",
+      "recommendation": "_aggregate_system_status で critical コンポーネントが 'degraded' の場合もシステムステータスを 'degraded' として返す（'unhealthy' への即昇格は不要。'healthy' / 'degraded' / 'unhealthy' の 3 値を外部 API で表現する）"
+    },
+    {
+      "id": "DM-510",
+      "severity": "low",
+      "category": "logging",
+      "title": "structlog correlation_id の bind/unbind が StrategySlot 経路のみで runner.py の heartbeat ループログに correlation_id が欠損",
+      "description": "correlation_id の structlog contextvars への bind は strategy_slot.py:574-591 の _handle_entry/_handle_exit スコープにのみ存在し、runner.py の heartbeat ループ（_periodic_heartbeat）・_check_live_health_alerts・_poll_cycle 等のトップレベルログには correlation_id が付与されない。structlog.contextvars.merge_contextvars（logger.py:48）は contextvars から自動マージするため、asyncio タスクをまたぐと別タスクの correlation_id が誤って混入（リーク）するリスクがある。coordinator.py:252 は bound_contextvars を with ブロック内で使用しているため正しいが、strategy_slot.py:574 の bind_contextvars + 591 の unbind_contextvars はスコープ管理に例外安全性の保証がなく、例外発生時に unbind が行われない可能性がある。",
+      "evidence": {
+        "file": "trading_platform/core/unified_runner/strategy_slot.py",
+        "line_range": "574-591",
+        "detail": "bind_contextvars(correlation_id=...) + unbind_contextvars('correlation_id') が try/finally でなく、例外安全でない可能性がある"
+      },
+      "impact": "異常系（PTRC 拒否・ブローカーエラー）発生時に correlation_id が unbind されず、後続ログに前の取引の correlation_id が付与される可能性がある。ログ分析時に誤った因果関係の追跡につながる",
+      "recommendation": "strategy_slot.py の bind_contextvars を with structlog.contextvars.bound_contextvars(correlation_id=...) ブロックに変更し、例外安全な unbind を保証する"
+    }
+  ]
+}

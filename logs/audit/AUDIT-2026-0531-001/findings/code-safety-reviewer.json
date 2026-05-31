@@ -1,0 +1,130 @@
+{
+  "agent": "code-safety-reviewer",
+  "scope": "ATLAS @ 74888095",
+  "audit_date": "2026-05-31",
+  "findings": [
+    {
+      "id": "CSR-601",
+      "severity": "high",
+      "area": "path_traversal / post_fix_defect",
+      "title": "validate_instrument / validate_timeframe dead code - data fetch write path traversal unclosed",
+      "description": "path_safety.py added validate_instrument and validate_timeframe but they are never imported. The data fetch command passes instrument unvalidated to save_to_parquet which constructs DATA_DIR/{instrument}_{timeframe}.parquet for writing. instrument=../../evil enables writes outside DATA_DIR.",
+      "evidence": [
+        "atlas/utils/path_safety.py:56-111 (validate_instrument/validate_timeframe defined but never imported)",
+        "atlas/backtest/data_loader.py:94-96 (get_parquet_path: DATA_DIR / {instrument}_{timeframe}.parquet)",
+        "atlas/backtest/data_loader.py:303-335 (save_to_parquet: df.to_parquet + meta_path.write_text)",
+        "atlas/main.py:779-788 (data_fetch: no validate_instrument call)",
+        "atlas/main.py:32 (only validate_generation_id imported from path_safety)"
+      ],
+      "reproduction": "atlas data fetch ../../evil --timeframe H1 writes to data/market/../../evil_H1.parquet. Deeper traversal possible with more ../.",
+      "suggested_fix": "Call validate_instrument(instrument) and validate_timeframe(timeframe) at the start of data_fetch, data_fetch_secondary, data_check commands in atlas/main.py. Also add to save_to_parquet for defense-in-depth.",
+      "post_fix_defect": true
+    },
+    {
+      "id": "CSR-602",
+      "severity": "high",
+      "area": "path_traversal / post_fix_defect",
+      "title": "context command (improve mode) --strategy-id bypasses validate_generation_id",
+      "description": "CSR-303 covered validate/backtest/metrics/score/evaluate but missed the context improve command. build_improvement_context calls _load_evaluation_report / _load_weakness_report / _load_adversarial_review / _load_direction_bias_from_metadata, all of which construct Path(strategies)/strategy_id without validation. test_csr303 has no context command test cases.",
+      "evidence": [
+        "atlas/main.py:651-655 (context improve: no validate_generation_id)",
+        "atlas/feedback/context_builder.py:203 (_load_evaluation_report: Path(strategies)/strategy_id/evaluation/report.json)",
+        "atlas/feedback/context_builder.py:219 (_load_weakness_report: same pattern)",
+        "atlas/feedback/context_builder.py:278-279 (_load_direction_bias_from_metadata: same pattern)",
+        "atlas/feedback/context_builder.py:493 (_load_adversarial_review: same pattern)",
+        "tests/unit/test_csr303_generation_id_cli_validation.py (no context command tests)"
+      ],
+      "reproduction": "atlas context improve --strategy-id ../../../etc/sensitive traverses outside strategies/.",
+      "suggested_fix": "Call validate_generation_id(strategy_id) at the start of the context improve block in atlas/main.py. Add context traversal test cases to test_csr303.",
+      "post_fix_defect": true
+    },
+    {
+      "id": "CSR-603",
+      "severity": "medium",
+      "area": "path_traversal / post_fix_defect",
+      "title": "backfill_v6_2_0_soft_score.py --gid/--gids-from bypasses validate_generation_id",
+      "description": "The script has its own _strategies_dir that does not call validate_generation_id. --gid CLI arg and lines from --gids-from file are joined unvalidated to ATLAS_ROOT/strategies/gid. _save_result_atomic writes .bak2 and .tmp files, so gid=../injection enables writes outside strategies/. runner.py _strategies_dir is fixed (asymmetry).",
+      "evidence": [
+        "scripts/backfill_v6_2_0_soft_score.py:68-69 (_strategies_dir: no validate_generation_id)",
+        "scripts/backfill_v6_2_0_soft_score.py:76-83 (_save_result_atomic: writes to ATLAS_ROOT/strategies/gid)",
+        "scripts/backfill_v6_2_0_soft_score.py:270-277 (--gid/--gids-from input unvalidated)",
+        "atlas/backtest/runner.py:97-98 (_strategies_dir: has validate_generation_id = asymmetry)"
+      ],
+      "reproduction": "python -m scripts.backfill_v6_2_0_soft_score --gid ../../outside/target attempts .bak2/.tmp writes outside ATLAS_ROOT.",
+      "suggested_fix": "Call validate_generation_id inside _strategies_dir or filter invalid gids in main() with skip + warning log.",
+      "post_fix_defect": true
+    },
+    {
+      "id": "CSR-604",
+      "severity": "medium",
+      "area": "exception_handling / post_fix_defect",
+      "title": "_load_evaluation_report and _load_direction_bias_from_metadata silently suppress exceptions (CSR-306 symmetry break)",
+      "description": "context_builder.py _load_evaluation_report (L208) and _load_direction_bias_from_metadata (L290) catch OSError/JSONDecodeError with no logger call before returning None. CSR-306 added logging to _compute_market_statistics but these two functions were not updated. CLAUDE.md rule violation and quant-analyst report load failures are completely hidden.",
+      "evidence": [
+        "atlas/feedback/context_builder.py:206-209 (_load_evaluation_report: except OSError/JSONDecodeError return None no log)",
+        "atlas/feedback/context_builder.py:289-291 (_load_direction_bias_from_metadata: same pattern)",
+        "atlas/feedback/context_builder.py:547-557 (_compute_market_statistics: CSR-306 fixed with logging)"
+      ],
+      "reproduction": "Place a corrupted evaluation/report.json and run atlas context improve; quant_analyst_report is absent from context with no diagnostic log.",
+      "suggested_fix": "Add logger.warning(..., exc_info=True) in the except blocks of _load_evaluation_report and _load_direction_bias_from_metadata to match CSR-306 pattern.",
+      "post_fix_defect": true
+    },
+    {
+      "id": "CSR-605",
+      "severity": "medium",
+      "area": "sandbox / ast_analysis",
+      "title": "TYPE_CHECKING guard forbidden imports cause undocumented false FAIL in static checker",
+      "description": "_check_imports uses ast.walk which ignores control flow, so if TYPE_CHECKING: import subprocess triggers FAIL even though it is never executed at runtime. This undocumented behavior may conflict with CLAUDE.md mandate to add type hints.",
+      "evidence": [
+        "atlas/validator/syntax_checker.py:177-186 (_check_imports: ast.walk ignores control flow)",
+        "atlas/validator/syntax_checker.py:70-86 (no exception for TYPE_CHECKING guarded imports)"
+      ],
+      "reproduction": "A strategy with from typing import TYPE_CHECKING; if TYPE_CHECKING: import subprocess will fail Stage 1.",
+      "suggested_fix": "Document the behavior as intentional spec, or add logic to demote TYPE_CHECKING-guarded forbidden imports to WARNING.",
+      "post_fix_defect": false
+    },
+    {
+      "id": "CSR-606",
+      "severity": "low",
+      "area": "backfill / data_integrity",
+      "title": "backfill tier1_passed logic misclassifies old-format result.json missing both all_passed and passed keys",
+      "description": "backfill L169: tier1_passed = bool(tier1_dict.get(all_passed) or tier1_dict.get(passed)) evaluates to False when both keys are absent, silently downgrading overall_passed to False. Current runner.py always serializes all_passed so new strategies are safe, but very old result.json (pre METRICS_SCHEMA_VERSION 5.0) may be affected.",
+      "evidence": [
+        "scripts/backfill_v6_2_0_soft_score.py:167-172 (tier1_passed evaluation)",
+        "atlas/common/models.py:355 (Tier1Result.all_passed field name)"
+      ],
+      "reproduction": "Run backfill against a result.json whose gate_check.tier1 has neither all_passed nor passed; overall_passed will be set to False.",
+      "suggested_fix": "Skip with skip_incompatible_schema status when both tier1 keys are absent, or emit WARNING log.",
+      "post_fix_defect": true
+    },
+    {
+      "id": "CSR-607",
+      "severity": "low",
+      "area": "sandbox / convention_violation",
+      "title": "SANDBOX_BUILTINS includes print() allowing strategy code to pollute stdout undetected",
+      "description": "sandbox_builtins.py L44 includes print:print, so strategy code using print() passes all four validation stages. CLAUDE.md mandates structlog and forbids print, but neither static nor runtime checks detect this. Strategy print() calls will corrupt the JSON output of atlas validate.",
+      "evidence": [
+        "atlas/common/sandbox_builtins.py:44 (print: print)",
+        "atlas/validator/syntax_checker.py:51-56 (FORBIDDEN_BUILTINS does not include print)"
+      ],
+      "reproduction": "A strategy with print(debug) in generate_signal passes Stages 1-4 and pollutes atlas validate stdout.",
+      "suggested_fix": "Add print to FORBIDDEN_BUILTINS to block it in Stage 1, or remove it from SANDBOX_BUILTINS to cause NameError at runtime.",
+      "post_fix_defect": false
+    },
+    {
+      "id": "CSR-608",
+      "severity": "low",
+      "area": "sandbox / memory_poll",
+      "title": "_mem_poll monitors whole-process RSS causing false-positive MemoryError in high-RSS environments (known bug, production unfixed)",
+      "description": "_mem_poll uses psutil.Process().memory_info().rss for the whole process, so a strategy with no allocations may fail with MemoryError if the host process RSS is already high. MEMORY.md records this as a known bug; test-infra fix (conftest psutil mock) is applied but the production fix (incremental RSS / subprocess) remains TODO.",
+      "evidence": [
+        "atlas/validator/sandbox_runner.py:134-136 (_mem_poll: proc = psutil.Process() whole-process RSS)",
+        "atlas/validator/sandbox_runner.py:140 (rss > _MEM_LIMIT_BYTES check)"
+      ],
+      "reproduction": "In a pytest session holding large pandas DataFrames, atlas validate may fail Stage 3 with MemoryError at bar 0.",
+      "suggested_fix": "Record baseline RSS before sandbox execution and trigger only when delta exceeds the limit. Alternatively isolate strategy execution in a subprocess.",
+      "post_fix_defect": false
+    }
+  ],
+  "audit_summary": "AUDIT-2026-0531-001: 8 findings detected in commits 05ae8595..74888095. Top 3 (CSR-601/602/603) are post_fix_defects of AUDIT-2026-0529-001 CSR-302/303. CSR-601: validate_instrument/validate_timeframe in path_safety.py are dead code, leaving the data fetch write path unprotected. CSR-602: context improve command was not covered by CSR-303; strategy_id used in path joins without validation. CSR-603: backfill script has an independent _strategies_dir with no validate_generation_id, asymmetric with the fixed runner.py. CSR-604: CSR-306 symmetry break - two helper functions in context_builder silently suppress exceptions. No new RCE or sandbox bypass vectors were found; CSR-101 and the main CSR-302/303 paths are functioning correctly."
+}

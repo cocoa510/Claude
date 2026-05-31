@@ -1,0 +1,193 @@
+{
+  "agent": "platform-architect",
+  "scope": "FTS アーキテクチャ (commit fca45f23 事後検証 + AUDIT-2026-0530-002 修正 (commit 34c2e3c) の post_fix_defect 検証)",
+  "audit_id": "AUDIT-2026-0531-001",
+  "fts_commit": "fca45f23 (HEAD)",
+  "fts_last_fix_commit": "34c2e3c (AUDIT-2026-0530-002 post_fix)",
+  "mode": "dry-run / investigate-only",
+  "files_inspected": [
+    "trading_platform/main.py",
+    "trading_platform/core/unified_runner/runner.py",
+    "trading_platform/core/event_bus/memory_adapter.py",
+    "trading_platform/core/event_bus/redis_adapter.py",
+    "trading_platform/core/strategy_engine/loader.py",
+    "trading_platform/core/strategy_engine/lifecycle.py",
+    "trading_platform/core/monitoring/email_notifier.py",
+    "trading_platform/core/monitoring/health_check.py",
+    "trading_platform/core/execution_engine/coordinator.py",
+    "trading_platform/config/settings.py",
+    "trading_platform/forward_test.py",
+    "tests/integration/test_pa401_main_eventbus_startup_order.py",
+    "tests/integration/test_pa412_escape_hatch_warning.py",
+    "tests/integration/test_graceful_shutdown.py"
+  ],
+  "audit_summary": "AUDIT-2026-0530-002 で指摘した PA-501 (metadata 参照切断) / PA-506 (件名/本文 mismatch) は commit 34c2e3c で root cause 修正済を確認した。一方 PA-502 / PA-503 / PA-504 / PA-505 / PA-507 は『追加修正対象外』として残置されており、本回監査で再評価した。特に PA-503 (rollback_stop が _eventbus_started_early / _email_notifier_started を False に戻さず、stop() も同様にリセットしないため、再 start() で event_bus.start / EmailNotifier.start が永久 skip される)『silent dead bus』再現経路は構造的に未塞ぎで、stop()→start() を回す統合テスト / 自動再起動マネージャを併用した瞬間に Email 通知 dead-path が再発する高リスクとして残存しているため PA-501 として再格上げした。さらに本回新規に PA-502 (notify_email_enabled=True かつ notify_email_to が空の構成で helper が _email_notifier_started=True を立てるが subscribe は一切行われず PA-401 の主旨 (silent drop 阻止) が破られる post_fix_defect)、PA-503 (escape hatch 経由で main.py が production LIVE 稼働中に runner.py だけが持つ Live 異常能動検知 (live_orders_silent / exposure_near_cap / position_reconcile_mismatch / account_position_mismatch) が完全に dead で INC-2026-0526-001 の検知系がバイパスされる二重実装ドリフト)、PA-504 (escape_hatch kind の throttle interval=0.0 が _should_throttle 実装上は『毎回 _last_sent_at 更新するが return False』で重複 publish 全通過 = 起動失敗→自動再起動ループで同一 escape_hatch を毎秒 Email 配信しうる semantics 矛盾)、PA-505 (main.py に GlobalRiskSupervisor 等価が無いため _emit_risk_alert が無く、StrategySlot.risk_alert_emitter / GlobalRiskSupervisor.emit_alert が main.py で wire 不可な構造非対称)、PA-506 (StrategyLifecycle が実装済みだが main.py / runner.py のどちらにも一切 wire されておらず governance dead code)、PA-507 (helper が EventBus 早期 start に失敗すると return するが _eventbus_started_early は False のまま、その後 main.start() の _start_step は event_bus.start を再試行 → 部分的 dead bus が観測不能)、PA-508 (escape hatch 経路で main.py の start() フローが OANDA 既存ポジション復元を一切行わないことを PA-103 警告は『明示している』が、_recover_state_fail_closed は StateStore (Redis) ベースの復元のみで OANDA-side restore_positions 相当が無い点を実装で隠蔽している) を新規発見。設計負債観点では DESIGN-D-001 (main.py vs runner.py の二重実装が AUDIT-2026-0525-002 PA-407 以降 6 監査回連続で post_fix_defect の温床) を観察記録に追加。",
+  "post_fix_verification": {
+    "PA-501_metadata_reference_fix_eccab9a_to_34c2e3c": "email_notifier.py:136-138 で `strategies_metadata if strategies_metadata is not None else {}` に修正済を確認 (line 136-138)。helper 経由でも参照保持される設計契約が満たされている。",
+    "PA-506_dispatcher_dedicated_builder_fix_34c2e3c": "email_notifier.py:447-479 で escape_hatch / entry_rollback_orphan 専用 builder (`_build_escape_hatch_message` / `_build_entry_rollback_orphan_message`) に差替済を確認。_LIVE_ANOMALY_LABELS (line 838-849) にも該当 alert_type が登録され件名が「Live 異常」汎用ラベルに倒れる問題は解消。本文も INC-2026-0526-001 固定文言から escape_hatch / orphan 用文脈に分離済。",
+    "PA-502_race_protection_lock": "未対応のまま残置。helper は依然として check-then-set パターンで asyncio.Lock 化されていない。現状の逐次 initialize フローでは race 不発だが、将来の `asyncio.gather` 並列化 / 他サブシステムからの helper 呼出で潜在化する設計負債。本回監査では別経路 (PA-507) からの再発リスクが顕在化したので関連 finding を PA-507 にまとめた。",
+    "PA-503_rollback_flag_reset": "未対応のまま残置。本回監査で重大度を再評価し PA-501 として高優先度で再起こし (詳細は findings 配列参照)。",
+    "PA-504_getattr_defense_smell": "未対応のまま残置。main.py:1150 / 1248 の `getattr(self, '_eventbus_started_early', False)` 経路は本回監査でも temptation を再確認したが、新たな実害は発見せず観察のみ。",
+    "PA-505_predicate_with_side_effect": "未対応のまま残置。_assert_not_unsupported_production_live が _escape_hatch_active=True を立てる副作用構造は維持。観察のみ。",
+    "PA-507_partial_subscribe_failure": "未対応のまま残置。EmailNotifier.start の 2 段 subscribe の中間 raise → helper のフラグは False のまま → 後続 start() が再 start → 二重 subscribe → 同一 FillEvent で 2 通配信、というシーケンスは PA-401 の補修で消えていない。本回 PA-502 (新規) で同じ症状の別経路を追加発見しているため両者統合検討を推奨。",
+    "Phase_4_5_BLOCKING_check": "PA-401 / PA-412 修正後の Phase 4.5 検出項目 (RE-502 等) は commit 34c2e3c で適用済を確認。escape_hatch 専用 builder の本文 / 件名はランタイム再現で意味整合性 OK。"
+  },
+  "summary": {
+    "post_fix_defect": 4,
+    "new_high": 2,
+    "new_medium": 4,
+    "new_low": 1,
+    "design_smell": 1,
+    "total_findings": 8
+  },
+  "findings": [
+    {
+      "id": "PA-501",
+      "severity": "high",
+      "area": "main.py / start() rollback + stop() フラグ恒久化",
+      "title": "rollback_stop / stop() が _eventbus_started_early / _email_notifier_started を False に戻さず、再 start() で event_bus.start / EmailNotifier.start が永久 skip される silent dead bus 経路 (AUDIT-2026-0530-002 PA-503 残置の本回再評価)",
+      "description": "main.py:235 / 266 の helper は `if not self._eventbus_started_early` / `if not self._email_notifier_started` でガードする idempotent パターン。一度 True に立つと、main.py:1150 / 1248 の `_start_step` ラッパーがフラグを尊重して `_eventbus_already_started` / `_email_notifier_already_started` の no-op start を選択する。ここで rollback_stop (main.py:1341-1346) は stop_fn 列を逆順で呼ぶだけでフラグはリセットしない。同じく通常 stop() (main.py:1348-1439) もフラグをリセットしない。プロセスマネージャ (systemd / supervisord / Docker restart policy) が start() 失敗時に自動再試行する構成、または統合テストが `await platform.stop(); await platform.start()` を回す構成では、2 回目の start() で EventBus.start は呼ばれず InMemoryEventBus._running=False のままになる。memory_adapter.py:94 `if not self._running: logger.warning(...) return` で全 publish が silent drop され、SignalEvent → FillEvent の発火経路全体がブラックホール化する。AUDIT-2026-0530-002 PA-503 で指摘された設計smell が、本回監査で実害シナリオ (graceful shutdown を許す自動再起動マネージャ + retry policy) を加味して再評価したところ HIGH に該当する。InMemoryEventBus.start は副作用が _running=True のみで他の依存破壊はないため、フラグリセットの修正コストは小さい。RedisEventBus.start は pubsub と listener_task を作り直すため二重 start 時の listener_task リークが新たな問題になるが、stop() で listener_task は cancel 済み (redis_adapter.py:181-186) のため再 start は安全。",
+      "evidence": [
+        "trading_platform/main.py:235 (helper の event_bus_started_early ガード)",
+        "trading_platform/main.py:266 (helper の email_notifier_started ガード)",
+        "trading_platform/main.py:1150 (start() 中の skip 分岐)",
+        "trading_platform/main.py:1248 (start() 中の skip 分岐)",
+        "trading_platform/main.py:1341-1346 (_rollback_stop がフラグ更新しない)",
+        "trading_platform/main.py:1348-1439 (通常 stop() でもフラグ更新無し)",
+        "trading_platform/core/event_bus/memory_adapter.py:54-56 / 94-96 (start で _running=True、未起動 publish が silent return)"
+      ],
+      "reproduction": "1) PlatformSettings(env=research) で TradingPlatform を構築。 2) `await platform.initialize()` 実行。 3) initialize 中の publish 経路 (例: 戦略 Gate 拒否) で helper が呼ばれ `_eventbus_started_early=True` / `_email_notifier_started=True` になる。 4) `await platform.stop()` 実行 (rollback 経由でも可)。 5) `platform._event_bus._running == False` および `platform._eventbus_started_early == True` を確認 (フラグと実体の乖離)。 6) `await platform.start()` 再呼出。 7) `_eventbus_already_started` no-op が選ばれ、event_bus._running は False のまま。 8) `await platform._event_bus.publish(RiskAlertEvent(...))` を実行 → memory_adapter.py:94-96 のガードで silent drop される。",
+      "suggested_fix": "(a) _rollback_stop の末尾と stop() の末尾で `self._eventbus_started_early = False` / `self._email_notifier_started = False` を明示的に戻す (最小コスト、4 行)。 (b) より堅牢には helper のガード式を「フラグ AND 実体 _running」のダブルチェックに変更し、フラグと実体の乖離を構造的に許容する。 (c) test_graceful_shutdown.py に `stop→start→publish→received==1` を assert する回帰テストを追加して再発を防ぐ。",
+      "regression_of": "AUDIT-2026-0530-002 PA-503 (本回監査で重大度を low→high に再評価)",
+      "post_fix_defect": true
+    },
+    {
+      "id": "PA-502",
+      "severity": "high",
+      "area": "main.py / _ensure_eventbus_and_notifier_started — notify_email_to 空文字経路",
+      "title": "notify_email_enabled=True かつ notify_email_to が空 (例: NOTIFY_EMAIL_TO='' で上書き) の構成で helper が _email_notifier_started=True を立てるが subscribe を一切行わず、escape hatch / Gate 拒否の RiskAlertEvent が EmailNotifier 購読前 publish と等価で silent drop する PA-401 主旨破り",
+      "description": "email_notifier.py:222-231 の `start()` は (1) `not notify_email_enabled` で no-op return、(2) `not notify_email_to` で WARN log + no-op return、(3) それ以外で `subscribe(FILL)` / `subscribe(RISK_ALERT)` 実行、の 3 分岐構造。helper (main.py:266-278) は start() の戻り値を確認せず例外発生のみで判定するため、ケース (2) すなわち notify_email_enabled=True だが notify_email_to が空 (環境変数 NOTIFY_EMAIL_TO='' で意図せず上書きされる、または settings 派生で空が伝播するケース) では subscribe しないまま `_email_notifier_started=True` が確定する。続いて main.py の Gate 拒否 / escape hatch の publish (line 546 / 632) が走るが、EmailNotifier は EventType.RISK_ALERT を subscribe しておらず memory_adapter.py:101-105 で「ハンドラ未登録」→ debug log のみで silent drop される。PA-401 修正の根幹である『主旨 (silent drop 阻止)』が、PA-401 が想定した 2 つの分岐 (enabled=False / 正常 start) の隙間に残った第 3 分岐 (enabled=True かつ to 空) で破られている。production で SMTP 設定の typo / Secrets manager の rotation 抜けで顕在化する。test_pa401_main_eventbus_startup_order.py は research デフォルト (notify_email_enabled=False) でしか idempotency を assert しておらず、enabled=True ✕ to='' の経路を検証していない盲点も併存する。",
+      "evidence": [
+        "trading_platform/core/monitoring/email_notifier.py:222-231 (3 分岐 start)",
+        "trading_platform/main.py:266-278 (戻り値検証なしのフラグ立て)",
+        "trading_platform/core/event_bus/memory_adapter.py:101-105 (handlers 未登録時 silent drop)",
+        "tests/integration/test_pa401_main_eventbus_startup_order.py:69-95 (enabled=False 経路しか検証していない)"
+      ],
+      "reproduction": "1) PlatformSettings(env=research, notify_email_enabled=True, notify_email_to='') で構築。 2) `await platform._ensure_eventbus_and_notifier_started()`。 3) `platform._email_notifier_started == True` だが、`InMemoryEventBus._handlers[EventType.RISK_ALERT] == []` であることを確認。 4) `await platform._event_bus.publish(RiskAlertEvent(level=CRITICAL, alert_type='platform_escape_hatch_active', ...))`。 5) memory_adapter.py:103 の debug ログ『ハンドラ未登録』が出るが email は 1 通も送信されない (silent drop)。",
+      "suggested_fix": "(a) EmailNotifier.start() で『subscribe したか』を bool 戻り値で返し、helper は戻り値が False (no-op return) のときは `_email_notifier_started` を False のままにする。 (b) もしくは helper 側で `if not (self._settings.notify_email_enabled and self._settings.notify_email_to): logger.error('email_dead_path', ...); return` の早期 guard を追加し、PA-401 の主旨 (silent drop 阻止) を構造的に維持する。 (c) test_pa401_main_eventbus_startup_order.py に notify_email_enabled=True ✕ notify_email_to='' のテストを追加。",
+      "regression_of": "PA-401 (本回新規発見の主旨破り経路)",
+      "post_fix_defect": true
+    },
+    {
+      "id": "PA-503",
+      "severity": "high",
+      "area": "main.py vs runner.py 二重実装 — INC-2026-0526-001 Live 異常検知の片寄せ",
+      "title": "PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE escape hatch で main.py が production LIVE 稼働中、runner.py だけが持つ live_orders_silent / exposure_near_cap / position_reconcile_mismatch / account_position_mismatch / oanda_connection_degraded の能動検知が完全に dead で INC-2026-0526-001 の検知系全部がバイパスされる",
+      "description": "AUDIT-2026-0529-001 RE-MISSED-302 以降に runner.py へ追加された INC-2026-0526-001 の幻エクスポージャー / Live 沈黙 / 上限張り付き対策 (_verify_oanda_account_consistency, _check_live_health_alerts, _maybe_reconcile_live_positions, _live_orders_submitted_total, _track_live_order_submissions, _reconcile_live_positions) は main.py には一切移植されていない。本回 grep で main.py には `live_orders_silent` / `exposure_near_cap` / `position_reconcile_mismatch` / `account_position_mismatch` / `_verify_oanda_account_consistency` のいずれも出現しないことを確認。一方 main.py:446-522 の PA-103 escape hatch は『PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1 で main.py 経由の本番 LIVE を許可する』ものであり、運用者が escape hatch を踏んだ瞬間に INC-2026-0526-001 の検知系全部 (Live 異常 5 種 + heartbeat 周期照合) を喪失する。PA-412 の WARN メッセージは『PA-103 (既存ポジション無認識) + PA-401 (Email dead-path)』のみを警告しており Live 異常検知喪失は明示されない。escape hatch 通過者は INC-2026-0526-001 の根因をすべてフォローしているはずだが、main.py 経路だと幻ポジション・Live 沈黙・上限張り付きの検知系を全部失う構造的非対称が残っており、INC-2026-0526-001 の再発リスクが構造的に高い。AUDIT-2026-0530-002 PA-407 で指摘した『二重実装による配線乖離』が、検知系の片寄せという形で本回再具現化している。",
+      "evidence": [
+        "trading_platform/main.py 全文 (grep で live_orders_silent / exposure_near_cap / position_reconcile_mismatch / account_position_mismatch ヒット 0)",
+        "trading_platform/core/unified_runner/runner.py:877-941 (_verify_oanda_account_consistency)",
+        "trading_platform/core/unified_runner/runner.py:972-1064 (_check_live_health_alerts)",
+        "trading_platform/core/unified_runner/runner.py:1070-1094 (_maybe_reconcile_live_positions)",
+        "trading_platform/core/unified_runner/runner.py:943-970 (_live_orders_submitted_total / _track_live_order_submissions)",
+        "trading_platform/main.py:446-522 (escape hatch — 検知系喪失について警告無し)",
+        "trading_platform/main.py:484-502 (PA-412 WARN — PA-103/PA-401 のみ言及)"
+      ],
+      "reproduction": "1) `PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1` を設定。 2) PlatformSettings(env=production, oanda_api_key='xxx', oanda_environment='live') で main.py 経路の TradingPlatform を起動。 3) 起動完了後 6 時間以上 Live エントリーが発生しない (戦略の全沈黙) シナリオを作る。 4) Email 受信箱に live_orders_silent が 1 通も届かないことを確認 (runner.py だと届く)。 5) 同様に OANDA 側で手動建玉を作って account_info.open_trade_count を内部の get_open_trades と乖離させても account_position_mismatch は飛ばないことを確認。",
+      "suggested_fix": "(a) 最小コストでは main.py の escape hatch 経路で『INC-2026-0526-001 検知系喪失』を PA-412 WARN に追記し運用者に明示する (1 ファイル変更)。 (b) 中期では _check_live_health_alerts / _verify_oanda_account_consistency 等を共通モジュール `trading_platform/core/monitoring/live_anomaly_detector.py` に抽出し main.py / runner.py が共有する (DESIGN-D-001 の解消)。 (c) 長期は ADR-PA-307 に従い main.py の LIVE 経路を deprecate し UnifiedRunner に統合する。",
+      "regression_of": "AUDIT-2026-0530-002 PA-407 (二重実装) の派生具現化 / INC-2026-0526-001 検知系の片寄せ",
+      "post_fix_defect": false
+    },
+    {
+      "id": "PA-504",
+      "severity": "medium",
+      "area": "core/monitoring/email_notifier.py / _should_throttle escape_hatch=0.0 semantics",
+      "title": "_EMAIL_THROTTLE_INTERVAL_SEC['escape_hatch']=0.0 は _should_throttle の `if last_at is not None and (now - last_at) < interval` で常に False (時刻差は >= 0、interval=0.0 で厳密 < 不成立) になり、毎呼出 _last_sent_at は更新されるが return False は維持される。意図 (起動時 1 回のみで throttle 不要) と実装 (throttle 無効化により無制限配信) の semantics 矛盾が残り、自動再起動ループで escape_hatch を毎秒 publish するシナリオで SMTP rate-limit と通知洪水を引き起こす",
+      "description": "email_notifier.py:391 で `'escape_hatch': 0.0` を明示登録した意図 (line 386-391 のコメント) は『起動時 1 回のみ発火するから throttle なしで OK、kill_switch と同等扱い』。しかし _should_throttle (line 394-417) の式 `if last_at is not None and (now - last_at) < interval` は interval=0.0 のとき必ず False (now - last_at は >= 0.0、`>= 0.0` を `< 0.0` で判定しないと True にならない)。結果として escape_hatch kind は『throttle されない = 毎回 send』の挙動になる。本来の意図はその通りだが、想定外シーンとして『プロセスマネージャが initialize() 中の例外で自動再起動を毎秒繰り返す』『main.py の start() rollback ループが PA-501 と相まって永久ループする』場合に、escape hatch alert を毎秒 publish → 毎秒 Email 1 通 → SMTP rate-limit (gmail は 1 アカウント 100 通 / 24h) を即超過 → live_orders_silent / kill_switch_activated 等の他通知系も巻き添えで失敗する。同様の semantics 矛盾は `kill_switch` 系 (登録なし = throttle 対象外) と意図的には同じだが、kill_switch は KS が一度発動すると新規発動はあり得ない (state 制約) のに対し、escape_hatch は『環境変数を立てて起動』を繰り返せば何度でも publish される。設計者の暗黙仮定 (起動時 1 回) を破壊する経路で実害化する。",
+      "evidence": [
+        "trading_platform/core/monitoring/email_notifier.py:386-391 (escape_hatch: 0.0 登録)",
+        "trading_platform/core/monitoring/email_notifier.py:394-417 (_should_throttle 実装)",
+        "trading_platform/core/monitoring/email_notifier.py:416 (`self._last_sent_at[kind] = now` — 0.0 interval でも毎回更新)",
+        "trading_platform/main.py:537-564 (initialize() で毎回 publish)",
+        "trading_platform/main.py:1144-1142 (start() 失敗時 rollback、リトライ前提なら毎再起動で escape_hatch 発火)"
+      ],
+      "reproduction": "1) EmailNotifier に platform_escape_hatch_active を 1 秒間隔で 100 回 publish (= 自動再起動ループのシミュレーション)。 2) _should_throttle('escape_hatch') が全 100 回で False を返すことを確認。 3) 全 100 回で _send_email_async が呼ばれることを確認。 4) gmail SMTP の 1 日 100 通制限を確実に超過する経路を実証。",
+      "suggested_fix": "(a) escape_hatch も他の live_anomaly 系と同じ 900 秒 throttle に変更し、頻発時に 1 通だけ通知する semantics に統一する (1 行修正)。 (b) もしくは _EMAIL_THROTTLE_INTERVAL_SEC から escape_hatch を削除し、kill_switch と同じ『dict 未登録 = throttle 対象外』に揃える (登録の意味付けを統一)。 (c) initialize() 側で『同一プロセス内で 2 度目の escape_hatch publish を抑止』するインメモリ guard を追加する (semantics の本来意図に最も近い)。",
+      "regression_of": "PA-412 の修正で導入された semantics 矛盾 (AUDIT-2026-0530-002 Phase 4.5 で見逃された経路)",
+      "post_fix_defect": true
+    },
+    {
+      "id": "PA-505",
+      "severity": "medium",
+      "area": "main.py vs runner.py 構造的非対称 — _emit_risk_alert の欠如",
+      "title": "main.py は GlobalRiskSupervisor / StrategySlot 等価物を持たないため _emit_risk_alert 経路が存在せず、runner.py が AUDIT-2026-0529-001 以降に積み上げた alert_type → AlertLevel マッピング (oanda_connection_degraded=WARNING / entry_rollback_orphan=CRITICAL 等) が main.py 経由の起動では使えない。RE-101 emitter のみが PTRC 系で wire されているが、その他の alert 発火源は main.py から RiskAlertEvent を発火できる経路が無い",
+      "description": "runner.py:1367-1386 の `_ALERT_LEVEL_BY_TYPE` マッピングは、alert_type ごとに正しい AlertLevel を付与する責務を担う (kill_switch_activated=EMERGENCY, unrealized_warning_activated=WARNING, entry_rollback_orphan=CRITICAL など)。runner.py の `_emit_risk_alert` (line 1388-1422) はこのマッピングを使って GlobalRiskSupervisor 経由の全ての alert に正しい level を付ける唯一の正規経路。main.py には GlobalRiskSupervisor 等価物が無く (PortfolioManager は別責務)、RiskAlertEvent を発火できるのは `_emit_ptrc_risk_alert` (PTRC 経路、level=CRITICAL 固定) と `initialize()` 内の inline publish (level=WARNING / CRITICAL のハードコード、2 箇所) のみ。escape_hatch (CRITICAL inline)、live_strategy_rejected_by_gate (WARNING inline) は実装されているが、それ以外の alert_type (例えば KillSwitch.activate が将来 main.py 経路でも発火する場合、CircuitBreaker.trigger を main.py 経路でフックする場合) には経路が無い。CircuitBreaker は main.py:893-896 で event_bus を渡して構築されているため自前で publish するが、AlertLevel の整合が runner.py 経路と乖離する可能性が高い (CircuitBreaker.trigger 内のハードコード level に依存)。配線負債の典型例で、AUDIT-2026-0530-002 PA-407 の根本治療として共通モジュール化が望まれる。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:1367-1386 (_ALERT_LEVEL_BY_TYPE)",
+        "trading_platform/core/unified_runner/runner.py:1388-1422 (_emit_risk_alert)",
+        "trading_platform/main.py:318-339 (_emit_ptrc_risk_alert のみ、level=CRITICAL ハードコード)",
+        "trading_platform/main.py:546-564 (escape_hatch inline publish)",
+        "trading_platform/main.py:632-644 (Gate rejection inline publish)"
+      ],
+      "reproduction": "コードリビュー観点。runner.py が将来 entry_rollback_orphan 以外の新規 alert_type を追加し _ALERT_LEVEL_BY_TYPE に登録した場合、main.py 経路で同等の alert を発火する手段が無く level 付与が ad-hoc 化する。将来劣化のシード。",
+      "suggested_fix": "(a) `_ALERT_LEVEL_BY_TYPE` を `trading_platform/core/models/risk.py` 等の共通モジュールに切り出し、main.py / runner.py / health_checker / circuit_breaker が全て同一マップを参照する。 (b) `_emit_risk_alert(alert_type, message, details, source)` をユーティリティ関数として共通化し、main.py / runner.py が thin wrapper で呼ぶ構造に変更する (二重実装の段階的解消)。",
+      "regression_of": "AUDIT-2026-0530-002 PA-407 派生 / DESIGN-D-001 (本回観察記録)",
+      "post_fix_defect": false
+    },
+    {
+      "id": "PA-506",
+      "severity": "medium",
+      "area": "trading_platform/core/strategy_engine/lifecycle.py — Dead Code",
+      "title": "StrategyLifecycle FSM (IMPORTED→VALIDATING→PAPER_TRADING→DEGRADED→SUSPENDED→RETIRED) が実装済みだが main.py / runner.py / forward_test.py のいずれにも一切 wire されておらず、戦略のライフサイクル状態が無管理。runner.py の StrategySlot.is_disabled は別概念で governance としては機能不足",
+      "description": "trading_platform/core/strategy_engine/lifecycle.py に 6 状態 FSM が実装されている (IMPORTED / VALIDATING / PAPER_TRADING / DEGRADED / SUSPENDED / RETIRED)、ALLOWED_TRANSITIONS で許可遷移を制約、InvalidTransitionError で不正遷移を阻止、TransitionRecord で履歴記録の構造。しかし grep で `StrategyLifecycle` の参照は本モジュール内のみ (1 ファイル) で、main.py / runner.py / forward_test.py / loader.py / worker.py の全てから一度も import / 利用されていない。実運用では各戦略の状態は (a) StrategySlot.is_disabled (runner.py、kill switch / consecutive losses 由来)、(b) self._strategies_rejected (main.py、Gate 拒否のみ)、(c) StrategyState (state_manager.py、注文・PnL 統計) の 3 つに分散しており、『戦略を PAPER_TRADING に保留中』『DEGRADED に降格』『RETIRED として保管』のような governance 操作はコードベースに存在しない。AUDIT-2026-0529-003 で議論された『LIVE Gate 拒否は WARNING / Email 通知』は state transition ではなく ad-hoc 通知。本 dead code は将来的に『正式に live 昇格 / 降格を管理する』際の足掛かりだが、現状未 wire のため保守時に『FSM が動いている』と誤解される温床。CLAUDE.md の重要な実装ルール『戦略の再現性管理』とも整合性が薄い。",
+      "evidence": [
+        "trading_platform/core/strategy_engine/lifecycle.py 全文 (FSM 完備)",
+        "grep結果: StrategyLifecycle 参照は lifecycle.py のみ (main.py / runner.py / forward_test.py / loader.py / worker.py で 0 件)"
+      ],
+      "reproduction": "コードリビュー観点のみ。実害は『次に戦略 governance を実装する設計者が既存 FSM の存在に気付かず似た FSM を再実装する』『FSM の存在を見て wire 済みと誤解し回帰テストで使い、本番動作と乖離した assert を書く』の 2 系統。",
+      "suggested_fix": "(a) lifecycle.py に大きく『未 wire / Reserved for future use』のモジュール docstring 注釈を追加し、誤解を防ぐ (最小コスト)。 (b) loader.py / runner.py の StrategySlot 初期化時に StrategyLifecycle(IMPORTED) を生成し最低限の遷移記録 (IMPORTED→VALIDATING→PAPER_TRADING) を追加して dead code を生かす。 (c) もしくは未利用 module として削除する。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "PA-507",
+      "severity": "medium",
+      "area": "main.py / _ensure_eventbus_and_notifier_started 部分失敗時の再試行整合",
+      "title": "helper の EventBus 早期 start が例外で失敗すると `_eventbus_started_early=False` のまま return するため、後続 start() の `_start_step` で event_bus.start を再試行する。再試行が成功すれば良いが、その際 EmailNotifier 側のフラグは未定義 (helper 未到達) で、start() 経路の email_notifier 生成は line 994 で行われる。この生成は initialize の戦略ロード後の populate (line 691) より前なので metadata は populate 済み (PA-501 fix の前提) だが、helper 経路の publish (line 632 の Gate rejection) はもう走り終わっている。つまり initialize 中の Gate rejection 通知は丸ごと silent drop され、後続 start で EmailNotifier だけ正常起動するというずれが発生しうる。観測難しく runbook も欠落",
+      "description": "main.py:235-248 の helper の EventBus 早期 start try ブロックは、例外発生時に `logger.exception` を出して return するだけで、Gate rejection の publish 経路 (line 632) は呼出元の `try/except Exception` (line 645) で握りつぶされ event 発火失敗が連鎖。すると Gate 拒否 strategy の通知が Email にも runner.py 同等の Audit Log にも届かない (audit log の方は line 612-624 で先に書かれているので部分残存)。一方で start() 内の `_start_step('event_bus', event_bus.start, ...)` は `getattr(self, '_eventbus_started_early', False)==False` 経路に入り、再度 event_bus.start を試行する。ここで成功するとフラグなしで _running=True になるが、helper 起点で publish 試行された RiskAlertEvent は再生されない (event は state ではなく flow なので消失済み)。EmailNotifier も同様に line 1248 で `getattr(self, '_email_notifier_started', False)==False` 経路で `en.start()` を呼ぶ。結果として後続 publish (例えば Coordinator や KS 経由) は正常配信されるが、helper 経路の Gate rejection 通知だけが silent drop する asymmetric な dead-path。runbook には『helper 失敗時の挙動』が記載されておらず運用者は気付けない。PA-401 の主旨破りに該当する。",
+      "evidence": [
+        "trading_platform/main.py:235-248 (helper 例外時 return)",
+        "trading_platform/main.py:625-646 (helper 呼出 + publish + 握りつぶし)",
+        "trading_platform/main.py:1150-1165 (start() で event_bus.start 再試行)",
+        "trading_platform/main.py:1248-1264 (start() で email_notifier.start 再試行)"
+      ],
+      "reproduction": "1) RedisEventBus を選択 (env=production) し、Redis サーバを down させる。 2) initialize() で Gate 拒否を 1 件以上発生させる。 3) helper の `await self._event_bus.start()` が ConnectionError で失敗 → return。 4) Audit log には live_strategy_rejected_by_gate が記録されるが、Email は届かない。 5) その後 Redis が復活し start() が成功する (タイミング次第)。 6) 後続の event は正常配信されるが、Gate rejection 通知だけが永久に dead。",
+      "suggested_fix": "(a) helper の except で `logger.error('dead_path', alert_type=alert_type)` を出すだけでなく、再試行ループに入る (バックオフ付き最大 3 回など)。 (b) もしくは helper 失敗時に `_pending_alerts` キューに alert を退避し、後段 start() 完了後にまとめて publish する。 (c) 最小コストでは helper の return 前に AuditLog に `email_dead_path` で『発火不能経路』を明示記録し、運用者が grep できるようにする。",
+      "regression_of": "PA-401 (idempotency idea の盲点)",
+      "post_fix_defect": true
+    },
+    {
+      "id": "PA-508",
+      "severity": "low",
+      "area": "main.py / start() — 状態復元の片寄せ",
+      "title": "main.py の `_recover_state_fail_closed` は StateStore (Redis / InMemory) ベースの復元のみで、OANDA-side restore_positions 相当を実装していない。PA-103 警告では『既存ポジション無認識リスク』を文言で警告しているが、実装上は escape hatch 通過後の start() で OANDA 既存 trade を一切認識しないため、warning の文言通り運用すると即時に二重エントリーリスクに突入する",
+      "description": "main.py:1297-1339 の `_recover_state_fail_closed` は coordinator.recover_state() を呼び、Redis state (orders/positions/risk_state/account_risk/kill_switch) を復元する。これは『プロセス再起動前後の内部状態整合』のための機能であり、『OANDA broker 側に残った既存 trade を内部 state に取り込む』機能 (runner.py の `_restore_all_positions` line 731-749 → strategy_slot.restore_positions) は実装されていない。PA-103 警告 (main.py:505-515) は『main.py は起動時に OANDA 既存ポジションの復元を行わない』と明示しているのでこれ自体は post_fix_defect ではないが、escape hatch 通過後の運用者が『state は復元されたから安全』と誤解する可能性は残る。state_recovery と broker_restoration の概念分離が runbook / docstring 双方で明示されていないので、混同しやすい。CLAUDE.md『重要な実装ルール — Execution Engine』にある『Order Reconciliation を定期実行し、OANDA 側との不整合を検知する』に対して main.py 経路は照合経路自体 (`PositionReconciler.start()` 経由 line 1233-1238) は持つが、起動時の reconcile は無いため reconciler の初回チェックまで unreconciled で運用される。",
+      "evidence": [
+        "trading_platform/main.py:1297-1339 (_recover_state_fail_closed が StateStore のみ)",
+        "trading_platform/core/unified_runner/runner.py:731-749 (_restore_all_positions が OANDA-side)",
+        "trading_platform/main.py:505-515 (PA-103 警告文言)",
+        "trading_platform/main.py:1233-1238 (Reconciler.start のみで初回照合無し)"
+      ],
+      "reproduction": "1) main.py 経路で escape_hatch=ON で起動。 2) OANDA Web で手動 trade を 1 件作成。 3) `_recover_state_fail_closed` が成功 (Redis state は復元)、しかし手動 trade は内部 state に取り込まれない。 4) 5 分後の reconciler 初回チェックまで unreconciled。 5) その間に同 instrument で戦略が新規エントリー → 二重ポジション。",
+      "suggested_fix": "(a) main.py:1297 の docstring に『本メソッドは StateStore 復元のみ。OANDA broker 側の既存 trade 取り込みは未実装 (PA-103 で escape hatch 必須)』と明示。 (b) runbook docs/runbooks/state_recovery_skip.md に同等の注意書きを追加。 (c) 中期的に runner.py の `_restore_all_positions` 相当を共通モジュールに抽出し main.py からも呼べるようにする (PA-103 escape hatch 不要化への布石)。",
+      "regression_of": null,
+      "post_fix_defect": false
+    }
+  ],
+  "design_d_001_platform_view": {
+    "issue": "main.py (FastAPI / dev 経路) と runner.py (UnifiedRunner / 本番経路) の二重実装は AUDIT-2026-0525-002 PA-407 / AUDIT-2026-0530-002 PA-407 / 本回 PA-503 / PA-505 で 3 連続で post_fix_defect の温床として再露呈している。INC-2026-0526-001 検知系 (Live 異常 5 種) / AlertLevel マッピング / OANDA-side restoration / フラグリセット規約 / EmailNotifier 早期起動の idempotency 仕様 — いずれも runner.py 側で先行実装され、main.py への移植が後追いで漏れる構造。PA-103 escape hatch を保持し続ける限り main.py の本番 LIVE 経路は『公式 deprecated だが踏める』状態にあり、運用者が踏んだ瞬間に検知系喪失が顕在化する。",
+    "platform_impact": "(a) AUDIT 毎に高優先度 post_fix_defect が 1-3 件発生し AUDIT コストが増加。(b) runbook / docstring の二重メンテで仕様が乖離。(c) 統合テストも二重に書く必要があり、片方を忘れると false-green が継続。",
+    "tradeoff": "(α) PA-103 escape hatch を完全廃止し main.py の production LIVE を不可逆 fail-closed に変更する → 運用柔軟性を失うが post_fix_defect の根を断つ。(β) live 検知系の共通モジュール (trading_platform/core/monitoring/live_anomaly_detector.py 等) を作り main.py / runner.py が共有する → 共通化コストは小だが既存テストの修正が必要。(γ) 現状維持 + AUDIT 毎に片寄せ差分を修正していく → 短期コスト最小だが long-tail で post_fix_defect 連鎖継続。本フィールドは『二重実装ドリフトの設計ペナルティ』を platform 視点で記録するのみで、修正提案はユーザー判断待ち (DESIGN-D-001 として上位エージェントに委ねる)。",
+    "no_finding_created": "DESIGN-D-001 は別系統 (ADR-PA-307 等) で扱うため本 platform-architect では finding 化せず観察記録のみ。"
+  }
+}

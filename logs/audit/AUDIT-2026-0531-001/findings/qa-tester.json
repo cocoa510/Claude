@@ -1,0 +1,275 @@
+{
+  "audit_id": "AUDIT-2026-0531-001",
+  "agent": "qa-tester",
+  "generated_at": "2026-06-01",
+  "repo": "fx_trading_system",
+  "commit": "fca45f23",
+  "audit_summary": "テスト網羅性・CI設定・契約テスト・Parity・回帰品質を横断調査した。全体的にテスト基盤は成熟しており、STRICT_SKIP, EFFECTIVE_WEIGHT_FLOOR ゴールデンテスト, PA-102/RE-101 回帰テストなど個別修正の回帰防護は概ね機能している。ただし以下の重大な死角が確認された: (1) CI の unit テストステップが tests/architecture, tests/risk_engine を取り込むが tests/fault は --ignore 無指定で走るものの parity.yml の単一ワークフロー兼務構造でカテゴリ別失敗の識別が困難, (2) E2E シグナルフロー統合テストが State Store 永続化・fill 後の on_fill 呼び出し・strategyState 更新まで追いきれていない, (3) CSR-101 の回帰テストが 'default 引数に __import__ を注入する Name ノード' というオリジナル攻撃ベクタを直接カバーしていない, (4) FaultRedisBackend が本番 RESP プロトコル非互換のため Redis 障害テストの本番経路踏破度が低い, (5) pytest.skip が prometheus_client 未インストール条件で 2 件残存しており STRICT_SKIP=1 環境で CI を失敗させるリスクがある, (6) test_full_signal_to_fill_flow が fills_completed==0 時を warnings.warn で終了させ偽緑を許容している。",
+  "findings": [
+    {
+      "id": "QA-601",
+      "title": "CSR-101 回帰テストが Name ノード経由 __import__ ベクタをカバーしていない",
+      "severity": "high",
+      "category": "regression_test_quality",
+      "description": "AUDIT-2026-0525-002 で記録された CSR-101 の攻撃ベクタは 'def f(x=__import__(\"os\")): ...' のようなデフォルト引数内での ast.Name ノードによる __import__ 注入だった。test_strategy_loader_ast_dynamic_exec.py の parametrize ケースは 'os = __import__(\"os\")' (ast.Call として現れる Assign ノード) のみをカバーしており、'def f(x=__import__(\"os\")): pass' のようなデフォルト引数パターン (ast.FunctionDef.args.defaults 内の ast.Call) は検証されていない。_audit_strategy_imports が実際にこのパターンを拒否するかは production コードの AST walker 実装次第だが、テストでそれを証明するケースが存在しない。",
+      "affected_files": [
+        "tests/unit/test_strategy_loader_ast_dynamic_exec.py",
+        "trading_platform/core/strategy_engine/loader.py"
+      ],
+      "evidence": "test_strategy_loader_ast_dynamic_exec.py:26-37 の parametrize ケース一覧に 'def f(x=__import__(\"os\")): pass' が含まれない。AUDIT-2026-0525-002 memory エントリに 'CSR-101: __import__ をデフォルト引数(Name ノード)で受ける未修正 RCE を実証' と記録されている。",
+      "recommendation": "test_strategy_loader_ast_dynamic_exec.py の parametrize ケースに 'def f(x=__import__(\"os\")): pass' を追加し、StrategyLoadError が送出されることを確認する。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-602",
+      "title": "test_full_signal_to_fill_flow が fills_completed==0 時に warnings.warn で偽緑化する",
+      "severity": "medium",
+      "category": "test_quality",
+      "description": "tests/integration/test_signal_flow.py:298-310 の test_full_signal_to_fill_flow は、500 本バーを流して約定が 0 件だった場合に pytest.fail や pytest.xfail を呼ばず warnings.warn でログを残して正常終了する。この分岐は 'E2E フロー自体の破壊ではなく戦略の発火条件不一致' という注釈付きで意図的に設計されているが、fills_completed==0 の場合はシグナル生成 → PTRC → BrokerGateway → fill_processor のうちどの段階も実質的に踏んでいない。フロー自体が壊れていても本テストは PASS する (偽緑)。",
+      "affected_files": [
+        "tests/integration/test_signal_flow.py"
+      ],
+      "evidence": "test_signal_flow.py:294-310: fills_completed == 0 分岐が warnings.warn のみで終了している。",
+      "recommendation": "fills_completed==0 時は pytest.xfail を使い、warnings.warn より可視性を高めると同時に xfail カウントで追跡可能にする。あるいはシグナルが必ず 1 件以上発火する合成データ fixture を専用に用意して偽緑を構造的に排除する。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-603",
+      "title": "FaultRedisBackend が InMemoryBackend ラッパーであり本番 RESP プロトコルを踏まない",
+      "severity": "medium",
+      "category": "test_quality",
+      "description": "tests/fault/conftest.py の FaultRedisBackend は InMemoryBackend (_inner) をラップしており、connected=False 時に ConnectionError を raise するのみ。本番の Redis クライアント (redis-py) が実際に発生させる aioredis.ConnectionError / ResponseError / TimeoutError などのシリアライズ・デシリアライズ経路は一切踏まない。tests/fault/conftest.py 自身のコメント (QT-305) も 'DE-311 Redis backend 未実装が完了後、fakeredis ベースに刷新する予定' と認めている。State Store の Redis 経路が本番と非互換のまま fault テストが緑になっている。",
+      "affected_files": [
+        "tests/fault/conftest.py",
+        "tests/fault/test_redis_disconnect.py"
+      ],
+      "evidence": "tests/fault/conftest.py:105-149: FaultRedisBackend._inner = InMemoryBackend()。QT-305 コメント (行 9-18) にプロトコル非互換が明記されている。",
+      "recommendation": "fakeredis ライブラリ導入後、FaultRedisBackend._inner を fakeredis.aioredis.FakeRedis に差し替えて RESP プロトコルレイヤーを本番互換にする (DE-311 完了後)。暫定措置として既存テストに 'このテストは InMemoryBackend 代替のため本番 RESP 経路を踏まない' 旨の pytest.mark.xfail または skip_reason を付与し、誤った安心感を防ぐ。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-604",
+      "title": "prometheus_client 未インストール条件の pytest.skip が STRICT_SKIP=1 環境で CI を失敗させる",
+      "severity": "medium",
+      "category": "skip_governance",
+      "description": "tests/unit/test_de403_feature_staleness_semantics.py の test_metrics_collector_gauge_labels_include_primary_tf および test_strategy_id_not_set_to_tf_name_only (行 193-237) で、'except ImportError: pytest.skip(\"prometheus_client 未インストール\")' と 'if not mc.prometheus_available: pytest.skip(\"Prometheus 利用不可\")' が各 2 件残存している。conftest.py で STRICT_SKIP=1 がデフォルト有効化されており、skip が 1 件でも存在すると pytest_sessionfinish が exit code 2 に上書きする。CI が prometheus_client インストール済み環境で実行される限り問題は顕在化しないが、テスト環境によっては CI が失敗する。",
+      "affected_files": [
+        "tests/unit/test_de403_feature_staleness_semantics.py"
+      ],
+      "evidence": "test_de403_feature_staleness_semantics.py:193-202, 222-231 に 4 件の pytest.skip が残存。conftest.py:434: 'STRICT_SKIP=1 が指定され、skip が N 件あるため非ゼロ終了します'。",
+      "recommendation": "prometheus_client が pyproject.toml の依存に含まれているため (parity.yml CI でもインストールされる) ImportError 経路は実質的に到達しない。try/except ImportError ガード自体を削除するか、prometheus_available チェックを pytest.importorskip('prometheus_client') に統一することで skip 件数を 0 にする。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-605",
+      "title": "CI parity.yml が単一ワークフローで parity / contract / unit を兼務しており失敗カテゴリが識別不能",
+      "severity": "low",
+      "category": "ci_configuration",
+      "description": "parity.yml の単一ワークフローが parity, contract, unit の 3 ステップを順次実行する設計になっている。GitHub Actions の通知メールは 'Parity CI' 名で届くため、unit テスト失敗と parity 乖離を件名で区別できない (QT-307/QT-317/DM-313 として既知)。また --ignore=tests/live と --ignore=tests/parity のみが指定されており、tests/architecture, tests/risk_engine, tests/fault, tests/performance, tests/contract のいずれも unit ステップで走るが、ステップは 'Run unit tests (non-live, non-parity)' と名付けられており実態と乖離している。",
+      "affected_files": [
+        ".github/workflows/parity.yml"
+      ],
+      "evidence": "parity.yml:107-113: ステップ名 'Run unit tests (non-live, non-parity)' に対して実際には fault/risk_engine/architecture/performance も含まれる。parity.yml:95-106: QT-307/QT-317/DM-313 の既知問題として unit.yml 分離を将来タスクと記録。",
+      "recommendation": "unit.yml を新設し、parity / contract / unit / fault / architecture の 4 ワークフローを分離する。少なくともステップ名を実態に合わせて 'Run non-parity tests (unit + fault + risk_engine + architecture)' に修正する。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-606",
+      "title": "テスト/本番経路の E2E でfill後 StateStore 永続化・on_fill 呼び出しが検証されていない",
+      "severity": "medium",
+      "category": "e2e_coverage",
+      "description": "test_signal_flow.py の test_full_signal_to_fill_flow および test_atlas_top3_strategies.py の TestE2EFlow は、fill_processor.process_fill() 呼び出しまでを検証するが、(a) strategy.on_fill() が実際に呼ばれたか、(b) FillProcessor が StateStore に永続化したか (save_position 等の呼び出し)、(c) fill 後に RiskState (daily_realized_pnl 等) が更新されたか、の 3 点を assert していない。on_fill は INC-2026-0527-001 で報告された phantom exposure 問題の連鎖点であり、fill → state_sync 経路は本番で繰り返し不具合が発生している。",
+      "affected_files": [
+        "tests/integration/test_signal_flow.py",
+        "tests/integration/test_atlas_top3_strategies.py"
+      ],
+      "evidence": "test_signal_flow.py:280-317: fill 後に fill_processor.get_all_positions() を確認するのみ。StateStore.save_position, strategy.on_fill の呼び出し確認なし。test_atlas_top3_strategies.py:558-586: fill_processor.process_fill 呼び出し後に fills_completed カウントのみ。",
+      "recommendation": "E2E テストに spy/assert_called を使って on_fill と StateStore.save_position が呼ばれたことを確認する assert を追加する。また FillProcessor が RiskState.daily_realized_pnl を更新するパスを単体テストでカバーする。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-607",
+      "title": "main.py vs runner.py 対称性を機械検証するテストが DM-204 以外に存在しない",
+      "severity": "medium",
+      "category": "contract_test",
+      "description": "AUDIT-2026-0525-002 の教訓として 'main.py (dev) と runner.py (本番) の二重実装が配線漏れの構造的根因' と確定しているが、契約テストは test_dm204_metrics_collector_production_wiring.py の metrics 注入と test_de101_quality_engine_production_wiring.py の DataQualityEngine 注入のみ。Kill Switch 状態同期 (GlobalRiskSupervisor)、EventBus 購読順序 (PA-401 で main.py 側のみ修正)、OandaCurrencyConverter 注入 (RE-101)、EmailNotifier の起動順序、などの配線が runner.py 側でも同一であることを保証するテストが個別には存在するが 'main↔runner 対称性テーブル' として一覧化・機械保証する統合テストがない。",
+      "affected_files": [
+        "tests/integration/test_dm204_metrics_collector_production_wiring.py",
+        "tests/integration/test_de101_quality_engine_production_wiring.py"
+      ],
+      "evidence": "tests/integration/ に main↔runner 全配線の対称性を一括検証するテストファイルが存在しない。test_dm204 の _EXPECTED_INJECTED_MODULES がハードコードされており、新規 set_metrics_collector 対象が追加された際に自動追従しない。",
+      "recommendation": "tests/contract/ または tests/integration/ に test_main_runner_symmetry.py を新設し、main.py と runner.py の各初期化ステップで注入されるコンポーネントの集合を比較するメタテストを追加する。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-608",
+      "title": "EventBus subscribe 順序の契約テストが main.py 経路のみに限定されている",
+      "severity": "low",
+      "category": "contract_test",
+      "description": "test_pa401_main_eventbus_startup_order.py は main.py (TradingPlatform) の EventBus 早期起動と EmailNotifier の購読順序を検証しているが、runner.py (UnifiedRunner) 側の同等の購読順序 (AUDIT-2026-0529-003 C-01 で修正済みと記録) に対する同等テストが存在しない。runner.py では initialize() 内で _ensure_eventbus_and_notifier_started 相当の処理が行われているか、あるいは publish が eventbus 起動前に呼ばれる可能性があるかを検証するテストがない。",
+      "affected_files": [
+        "tests/integration/test_pa401_main_eventbus_startup_order.py"
+      ],
+      "evidence": "test_pa401_main_eventbus_startup_order.py のテストはすべて TradingPlatform (main.py) に対して実行されており、UnifiedRunner (runner.py) に対する EventBus 起動順序テストが見当たらない。",
+      "recommendation": "test_pa401 と対称な test_pa401_runner_eventbus_startup_order.py を新設し、UnifiedRunner.initialize() → start() の順序で RiskAlertEvent が silent drop されないことを検証する。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-609",
+      "title": "Parity テスト の realistic_ohlcv fixture が DatetimeIndex を持たず时刻依存指標の parity が保証されない",
+      "severity": "low",
+      "category": "parity_test",
+      "description": "test_feature_store_parity.py の realistic_ohlcv fixture (行 27-55) は RangeIndex の DataFrame を返す。QT-308 (conftest.py:sample_ohlcv_df) では UTC tz-aware DatetimeIndex が付与されているが、parity fixture には同等の修正が適用されていない。Asia セッションフィルタや時刻依存の指標 (stochastic_k/stochastic_d 等) を含む戦略が generate_signal() 内で bar.name (timestamp) に依存する場合、parity テストのデータは bar.name=None になり、本番 Live 経路の挙動と乖離する可能性がある。",
+      "affected_files": [
+        "tests/parity/test_feature_store_parity.py"
+      ],
+      "evidence": "test_feature_store_parity.py:27-55: pd.DataFrame(...) の index が RangeIndex。conftest.py:252: index = pd.date_range('2024-01-01', periods=n, freq='h', tz='UTC') として UTC 付き DatetimeIndex が付与されている (QT-308)。",
+      "recommendation": "realistic_ohlcv fixture に QT-308 と同様の UTC tz-aware DatetimeIndex を付与する。ATLAS _SimpleFeatureStore も DataFrame index を参照しない場合は影響なしだが、将来の時刻依存指標追加に備えて統一する。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-610",
+      "title": "CI の --maxfail=10 が fault テスト群の連鎖失敗を隠蔽する可能性がある",
+      "severity": "low",
+      "category": "ci_configuration",
+      "description": "parity.yml の unit テストステップは pytest tests/ --maxfail=10 で実行されるが、tests/fault/ は --ignore 対象に含まれないため unit ステップで走る。fault テストは BrokerUnavailableError, ConnectionError 等の障害注入を行い、1 つの根本障害から複数の fault テストが同時に失敗することがある。--maxfail=10 は INV-2026-0528-001 の対策として導入されたが、fault テスト群の連鎖失敗が 10 件を超えると後続の unit/architecture テストの失敗が隠れる。",
+      "affected_files": [
+        ".github/workflows/parity.yml"
+      ],
+      "evidence": "parity.yml:113: pytest tests/ --maxfail=10 --ignore=tests/live --ignore=tests/parity -q。fault/ ディレクトリが除外されていない。",
+      "recommendation": "fault テストを専用の CI ステップに分離するか、--maxfail を per-category で設定できるよう ワークフローを再構成する。暫定措置として --maxfail=20 程度に引き上げることで隠蔽リスクを軽減する。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-611",
+      "title": "QA-201/301 仕様変更後の FTS 側テストが存在しない (per-bar var_95 と EFFECTIVE_WEIGHT_FLOOR の変更)",
+      "severity": "medium",
+      "category": "test_gap",
+      "description": "監査指示に記載された QA-201 (per-bar var_95 backfill) と QA-301 (EFFECTIVE_WEIGHT_FLOOR の 0.70→0.90 変更) の回帰テストは ATLAS リポジトリ側 (tests/golden/test_qa201_risk_metrics_full_equity.py, tests/golden/test_qa301_soft_score_floor.py) に存在する。しかし FTS 側 (fx_trading_system/tests/) には、これらの変更が FTS の forward_test.py や comparator の評価スコア計算に影響しないことを保証するテストが存在しない。FTS が ATLAS の atlas.analyzer.metrics / atlas.backtest.runner を import して評価を行う経路がある場合、EFFECTIVE_WEIGHT_FLOOR 変更後のスコアが FTS 側で正しく反映されているかの契約テストが不在。",
+      "affected_files": [
+        "trading_platform/forward_test.py"
+      ],
+      "evidence": "grep で 'var_95', 'EFFECTIVE_WEIGHT_FLOOR', 'QA-201', 'QA-301' を FTS tests/ 配下で検索した結果、0 件。ATLAS 側の tests/golden/test_qa201_risk_metrics_full_equity.py および test_qa301_soft_score_floor.py にゴールデンテストが存在する。",
+      "recommendation": "FTS が ATLAS の評価関数を呼ぶ経路 (forward_test.py 等) に対して、QA-201/301 の変更後の期待スコアを検証するテストを FTS 側にも追加する。あるいは forward_test.py が ATLAS 評価を直接呼ばない (BT 結果を参照するのみ) であればその旨を tests/integration/test_forward_test_mtf_warmup.py にコメントで明記する。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-612",
+      "title": "pre-commit の mypy が tests/ ディレクトリに適用されていない",
+      "severity": "low",
+      "category": "ci_configuration",
+      "description": ".pre-commit-config.yaml の mypy hook は files: ^trading_platform/ に限定されており、tests/ ディレクトリへの型チェックが適用されない。tests/ 内のテストファイルは型ヒントを省略可能 (CLAUDE.md 記述) だが、conftest.py や fixture モジュールでは型付き関数が存在し、型不整合によるテスト自体のバグが commit 時に検出されない。特に bar_event_factory fixture (conftest.py:449-512) や atlas_scenario_fixtures.py の型注釈は将来の drift リスクがある。",
+      "affected_files": [
+        ".pre-commit-config.yaml"
+      ],
+      "evidence": ".pre-commit-config.yaml:24: files: ^trading_platform/ の制限により tests/ が対象外。conftest.py:449: def _make(...) -> BarEvent: はすでに型付きだが mypy でチェックされない。",
+      "recommendation": "mypy hook に additional_directories として tests/ を追加するか、conftest.py / fixture ファイルのみ対象に限定してチェックする設定を追加する。テスト関数本体の型注釈は省略可能のまま維持してよい。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-613",
+      "title": "test_strategy_contract.py が DatetimeIndex なし OHLCV を使用しセッション依存戦略の契約検証が不完全",
+      "severity": "low",
+      "category": "test_quality",
+      "description": "tests/integration/contract/test_strategy_contract.py の _generate_ohlcv (行 108-129) は RangeIndex の DataFrame を生成する。この OHLCV を受け取る StrategyWorker の bars_processed 確認は行われるが、Asia セッションフィルタ (bar.name.hour 等) を使う戦略は全バーで時刻フィルタが NaT/None になりシグナルが出ない。契約3 (Worker が全バーを処理すること) は確認されるが、契約4 (例外なく完走) は戦略が bar.name に NoneType アクセスして AttributeError を起こす場合に失敗する。一方で現在は AttributeError が発生しないのであれば、セッション依存戦略は全バーで意図せずシグナルを抑制している。",
+      "affected_files": [
+        "tests/integration/contract/test_strategy_contract.py"
+      ],
+      "evidence": "test_strategy_contract.py:108-129: pd.DataFrame(... ) の index が RangeIndex。xfail_scenario_signals.py:101 では bar.name = ts として timestamp を明示設定している (Asia breakout の hour 判定に必須)。",
+      "recommendation": "_generate_ohlcv に QT-308 と同様の UTC tz-aware DatetimeIndex を付与する。これにより Asia セッション等のフィルタが実際に機能する状態で契約検証が行われる。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-614",
+      "title": "STRICT_SKIP ガバナンスの抜け穴: pytest_terminal_summary の session.exitstatus 上書きが実装依存",
+      "severity": "low",
+      "category": "skip_governance",
+      "description": "conftest.py の pytest_sessionfinish は session.exitstatus = 2 を直接代入することで STRICT_SKIP=1 違反時の非ゼロ終了を実現しているが、pytest の公式 API では exitstatus への直接代入はサポートされていない (内部属性)。pytest バージョンアップ時に session.exitstatus が read-only プロパティに変更された場合、STRICT_SKIP の強制機能が無音でサイレント化し、CI で skip が検出されなくなる。この脆弱性は STRICT_SKIP ガバナンス全体の信頼性に関わる。",
+      "affected_files": [
+        "tests/conftest.py"
+      ],
+      "evidence": "conftest.py:443-445: 'session.exitstatus = 2' を直接代入。pytest 8.x の内部実装では Session.exitstatus は int 属性として書き込み可能だが、将来バージョンでの変更リスクがある。",
+      "recommendation": "STRICT_SKIP 判定ロジックを pytest_sessionfinish ではなく pytest_collection_finish または pytest_runtest_makereport フックに移し、pytest.fail() を呼ぶ方式に変更する。あるいは session.exitstatus 上書きが期待通り機能することを検証するメタテストを追加する。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-615",
+      "title": "parity.yml CI の paths-ignore が ATLAS submodule 変更時に parity テストをスキップする",
+      "severity": "low",
+      "category": "ci_configuration",
+      "description": "parity.yml の paths-ignore は 'logs/**' のみを除外する。ATLAS リポジトリは fx_trading_system の pyproject.toml に 'file:///c:/data/...' で参照されているが、ATLAS の計算ロジック変更 (特に _build_builtin_indicators や _SimpleFeatureStore) は parity テストに直接影響する。しかし parity.yml は ATLAS の push event に対してトリガーされないため、ATLAS 側の指標追加・変更が FTS の parity CI をすり抜ける。ATLAS 側に新指標が追加されると test_no_uncovered_builtin_indicators が失敗するはずだが、FTS の CI はその追加を検知できない。",
+      "affected_files": [
+        ".github/workflows/parity.yml"
+      ],
+      "evidence": "parity.yml:7-17: on.push.branches と paths-ignore の設定が FTS リポジトリの変更のみをトリガーとしている。ATLAS は別リポジトリ (cocoa510/ATLAS) として参照される。",
+      "recommendation": "ATLAS リポジトリ側にも parity CI trigger を設定するか、ATLAS に変更があった場合に FTS の parity CI を手動またはスケジュール起動する仕組みを追加する。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-616",
+      "title": "test_atlas_top3_strategies.py の TestE2EFlow が loaded_strategy.instrument を USD_JPY に固定してPaperBrokerに価格投入している",
+      "severity": "low",
+      "category": "test_quality",
+      "description": "tests/integration/test_atlas_top3_strategies.py の TestE2EFlow.test_full_signal_to_fill (行 505-506) は paper_broker.update_price('USD_JPY', ...) と 'USD_JPY' をハードコードしている。loaded_strategy の instrument が EUR_USD や GBP_JPY 等の場合、PaperBroker には loaded_strategy.instrument の価格が設定されず 'USD_JPY' のみが設定される。Broker が loaded_strategy.instrument の価格を取得しようとした場合は価格なし状態になり fill が意図せず失敗する可能性がある。",
+      "affected_files": [
+        "tests/integration/test_atlas_top3_strategies.py"
+      ],
+      "evidence": "test_atlas_top3_strategies.py:505-506: paper_broker.update_price('USD_JPY', bid=close - spread / 2, ask=close + spread / 2) が instrument をハードコードしている。test_worker_coordinator.py:163-164 では loaded.instrument を参照して正しく対応している。",
+      "recommendation": "paper_broker.update_price の引数を 'USD_JPY' から loaded_strategy.instrument に変更し、非 JPY ペアの戦略でも正しい価格が投入されるようにする。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-617",
+      "title": "test_dm204_metrics_collector_production_wiring の _EXPECTED_INJECTED_MODULES がハードコードで新規モジュール追加を検出できない",
+      "severity": "low",
+      "category": "contract_test",
+      "description": "tests/integration/test_dm204_metrics_collector_production_wiring.py:34-42 の _EXPECTED_INJECTED_MODULES は {'fill_processor', 'circuit_breaker', 'ptrc', 'bar_builder', 'candle_fetcher', 'stream_receiver', 'loader'} と固定されている。将来 set_metrics_collector を必要とする新規モジュールが runner.py に追加された場合、このリストへの追記を開発者が忘れると未検出のまま dead path になる。検出網の更新がリストへの手動追記に依存しており、契約テストの網羅性が人間の注意に依存している。",
+      "affected_files": [
+        "tests/integration/test_dm204_metrics_collector_production_wiring.py"
+      ],
+      "evidence": "test_dm204_metrics_collector_production_wiring.py:34-42: _EXPECTED_INJECTED_MODULES がハードコード。runner.py 内で set_metrics_collector を呼ぶ箇所を AST で動的に収集して expected と照合するアプローチが取られていない。",
+      "recommendation": "runner.py の AST を解析して set_metrics_collector の呼び出し箇所を動的に収集し、_EXPECTED_INJECTED_MODULES と双方向に照合する (実装が期待を満たすか、かつ期待が実装を全て網羅するか) テストに改修する。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-618",
+      "title": "test_full_signal_to_fill_flow でPaperBrokerのspread固定値が非JPYペア戦略に対して誤った価格を投入する",
+      "severity": "low",
+      "category": "test_quality",
+      "description": "tests/integration/test_signal_flow.py:228 の spread = 0.03 (3銭) は USD_JPY 向けの値。atlas_strategy_001 fixture が非 JPY ペア (EUR_USD 等) の戦略を返す場合、spread=0.03 の half spread は EUR_USD の通常スプレッド (0.7pips = 0.00007) の約 200 倍に相当し、PTRC SPREAD_CHECK で全注文が拒否される可能性がある。test_worker_coordinator.py はこの問題を修正して pip 変数で instrument に応じた spread を使っているが、test_signal_flow.py には同等の修正が適用されていない。",
+      "affected_files": [
+        "tests/integration/test_signal_flow.py"
+      ],
+      "evidence": "test_signal_flow.py:228: spread = 0.03 が USD_JPY 向けにハードコード。test_worker_coordinator.py:164-165: pip = 0.01 if instrument.endswith('_JPY') else 0.0001 として動的に設定。",
+      "recommendation": "spread を atlas_strategy_001.instrument に基づいて動的に設定する。JPY ペアは spread=0.03 (3銭)、非 JPY ペアは spread=0.0003 (0.3 pips 相当) を使用する。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-619",
+      "title": "test_no_existence_skip の violation パターン検出がコメント行を除外せずファイルパスに pytest.skip を含むケースで誤検出する可能性",
+      "severity": "low",
+      "category": "skip_governance",
+      "description": "tests/integration/test_no_existence_skip.py:102-103 では 'pytest.skip を含む行のみ対象' とするが、行が stripped されてから 'pytest.skip' の存在を確認しているだけで、コメント行 (# pytest.skip ...) を除外していない。violation_patterns リストに合致するコメント行があると誤検出が発生し、false positive で CI が失敗する可能性がある。また、文字列リテラル内の 'pytest.skip' (例: エラーメッセージに含まれるもの) も除外されていない。",
+      "affected_files": [
+        "tests/integration/test_no_existence_skip.py"
+      ],
+      "evidence": "test_no_existence_skip.py:96-103: ファイル行を stripped して 'pytest.skip' を検索しているが、コメント行 (# で始まる行) の除外が見当たらない。",
+      "recommendation": "violation 検出ロジックに 'stripped.startswith(\"#\")' の除外チェックを追加し、コメント行を無視する。また AST parse を使って文字列リテラル内の pytest.skip を除外することを検討する。",
+      "dry_run": true
+    },
+    {
+      "id": "QA-620",
+      "title": "tests/performance のベンチマークテストが CI から除外されておらず timeout=30 で誤 FAIL するリスク",
+      "severity": "low",
+      "category": "ci_configuration",
+      "description": "tests/performance/ ディレクトリは parity.yml の --ignore に含まれていない。_bench_baseline.py と test_live_store_latency.py が存在する。pyproject.toml の timeout=30 がデフォルトで適用されるため、パフォーマンステストが 30 秒を超えた場合に誤 FAIL する。テストファイルが @pytest.mark.timeout(N) で個別緩和していない場合、特に負荷が高い環境では CI が不安定になる。",
+      "affected_files": [
+        ".github/workflows/parity.yml",
+        "tests/performance/test_live_store_latency.py"
+      ],
+      "evidence": "parity.yml:113: --ignore=tests/live --ignore=tests/parity のみで tests/performance が除外されていない。pyproject.toml:105: timeout = 30 がデフォルト。",
+      "recommendation": "tests/performance/ を --ignore=tests/performance で CI から除外するか、performance テストに @pytest.mark.timeout(120) 等を付与して明示的に緩和する。",
+      "dry_run": true
+    }
+  ]
+}

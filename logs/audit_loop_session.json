@@ -1,0 +1,95 @@
+{
+  "session_id": "AUDIT-2026-0531-001",
+  "session_start": "2026-05-31T23:55:00Z",
+  "session_end": "2026-06-01T01:15:00Z",
+  "limit_minutes": 300,
+  "threshold_pct": 94,
+  "target": "both",
+  "focus": "直近修正コミット群 (eccab9a, 34c2e3c, 15d62e62, 9c83b9f5, 74888095, 05d2ba3) の事後検証 + 退行 + 新規欠陥",
+  "severity_threshold": "critical",
+  "max_rounds": 10,
+  "max_fixes_per_round": 5,
+  "mode": "dry-run / investigate-only",
+  "current_round": 1,
+  "verdict": "NOT_converged (CRITICAL 1 + HIGH 14 検出、修正未着手)",
+  "rounds": [
+    {
+      "round": 1,
+      "phase1_agents": [
+        "code-safety-reviewer",
+        "quant-analyst",
+        "platform-architect",
+        "risk-execution-engineer",
+        "data-engineer",
+        "qa-tester",
+        "devops-monitor"
+      ],
+      "findings_total": 87,
+      "validated_true": 86,
+      "validated_false": 1,
+      "downgraded": 7,
+      "upgraded": 2,
+      "severity_pre_validation": {
+        "critical": 1,
+        "high": 16,
+        "medium": 29,
+        "low": 30,
+        "info_warn": 11
+      },
+      "severity_post_validation": {
+        "critical": 1,
+        "high": 14,
+        "medium": 30,
+        "low": 41,
+        "info": 1,
+        "invalid": 1
+      },
+      "fixed": 0,
+      "deferred": 86,
+      "verdict": "調査のみ（dry-run）。修正は未実施。"
+    }
+  ],
+  "critical_findings": {
+    "RE-505": "main.py 単独本番稼働の強い痕跡 (2026-05-30 audit log で account_balance=1,000,000 PTRC reject 20件, 同日 UnifiedRunner ログ不在)"
+  },
+  "high_findings": {
+    "CSR-601": "validate_instrument/validate_timeframe dead code (CSR-302/303 post_fix_defect)",
+    "CSR-602": "context improve --strategy-id が validate_generation_id バイパス (CSR-303 post_fix_defect)",
+    "PA-501": "rollback_stop/stop() でフラグ未リセット → 再start で EventBus silent dead",
+    "PA-502": "notify_email helper の subscribe 漏れ (PA-401 post_fix_defect)",
+    "PA-503": "PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE 経由 Live 異常検知 5 種 dead",
+    "RE-501": "PostTradeRiskControl が UnifiedRunner で完全未配線",
+    "RE-508": "KS 5h 内 2 回発動、daily_realized_pnl 永続性で REV-1 違反リスク (medium→high 格上げ)",
+    "DE-501": "observe_feature_staleness strategy_id ラベルに TF 名 (DE-403 post_fix_defect)",
+    "DE-502": "SharedDataProvider.poll_latest backlog drop (critical→high 格下げ)",
+    "DE-503": "main.py OANDAStreamReceiver backfill 引数未注入",
+    "DE-504": "main.py CandleFetcher state_store 未注入",
+    "DE-506": "fx_data_quality_forced_publish_total アラート未定義",
+    "DM-501": "StrategySlot._metrics 永久 None → FxStalePnlTransientSkipHigh dead",
+    "QA-601": "QA-301 backfill で is_duplicate 再評価なし → クラスタ占有戦略固定化",
+    "QA-602": "QA-302 既知欠陥未対処 (oos_is_pf_ratio フォールバック)"
+  },
+  "cross_cutting_concerns": {
+    "CC-001": "main.py 単独本番稼働の compound risk (6 系統安全機構同時 dead)",
+    "CC-002": "post_fix_defect 構造的再生産 (Phase 4.5 でも検出漏れ)",
+    "CC-003": "main.py vs runner.py 二重実装の限界 → ADR-PA-307 前倒し",
+    "CC-004": "テスト基盤の構造的死角 (RCE Name ノード, 配線対称性, E2E full-flow)"
+  },
+  "dedup": [
+    {"canonical": "DE-503", "duplicate": "DE-504", "reason": "main.py backfill 配線漏れ一括対応"},
+    {"canonical": "DE-501", "duplicate": "DE-505", "reason": "strategy_id ラベル意味論一括対応"},
+    {"canonical": "QA-605", "duplicate": "DM-508", "reason": "CI parity.yml 分離一括対応"},
+    {"canonical": "QA-610", "duplicate": "QA-620", "reason": "performance テスト設定一括対応"}
+  ],
+  "invalidated": ["DM-509"],
+  "next_steps": [
+    "P0: RE-505 真因確定 (main.py 単独本番稼働 or 二重起動) — 最優先",
+    "P1: post_fix_defect 5 件一括修正 (CSR-601/602, PA-501/502, DE-501)",
+    "P1: RE-501/RE-508/DE-502 修正",
+    "P1: DM-501/DM-507 修正",
+    "P2: PA-407 / ADR-PA-307 (main.py 廃止) 検討",
+    "P2: QA-601/QA-602 修正",
+    "P3: medium 30 件を次回 audit-loop で対処"
+  ],
+  "summary_path": "logs/audit/summary_AUDIT-2026-0531-001.md"
+}
